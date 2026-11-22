@@ -9,6 +9,7 @@ import {
   refreshWithClient,
   resolveOAuthClient,
   startLoopbackOAuthFlow,
+  type HttpFetcher,
   type OAuthClientConfig,
   type PendingOAuthFlow
 } from './oauth'
@@ -21,9 +22,23 @@ import {
   runCommand,
   type PlatformPaths
 } from './platform'
-import type { AccountsSnapshot, OrcaAgentKind, SwitchResult } from './protocol'
+import type { AccountsSnapshot, OrcaAgentKind, PluginUpdateInfo, SwitchResult } from './protocol'
 import { buildStatusBarState } from './status'
+import {
+  dismissStoredUpdateVersion,
+  readInstalledPluginVersion,
+  runStoredUpdateCheck
+} from './update-check'
 import { listVaultAccounts, removeVaultAccount, saveVaultAccount } from './vault'
+import {
+  DEFAULT_QUOTA_TTL_MS,
+  DEFAULT_SETTINGS,
+  MIN_POLL_SECONDS,
+  parseSettings,
+  type PluginSettings
+} from './worker-settings'
+
+export { DEFAULT_QUOTA_TTL_MS, MIN_POLL_SECONDS, parseSettings }
 
 export type WorkerDeps = {
   paths?: PlatformPaths
@@ -31,60 +46,15 @@ export type WorkerDeps = {
   findAgy?: () => string | null
   runner?: CommandRunner
   fetcher?: QuotaFetcher
+  updateFetcher?: HttpFetcher | null
+  pluginVersion?: string
   platform?: NodeJS.Platform
   oauthClient?: OAuthClientConfig | null
   readCurrentLogin?: () => Promise<AgyStoredToken | null>
 }
 
-type PluginSettings = {
-  pollSeconds: number
-  statusClickAction: 'refresh' | 'switchBest'
-  showAgyPool: boolean
-  autoSwitchLowQuota: boolean
-  lowQuotaThreshold: number
-  oauthClientId: string
-  oauthClientSecret: string
-}
-
-export const MIN_POLL_SECONDS = 600
-export const DEFAULT_QUOTA_TTL_MS = 5 * 60 * 1000
-
-const DEFAULT_SETTINGS: PluginSettings = {
-  pollSeconds: 0,
-  statusClickAction: 'refresh',
-  showAgyPool: true,
-  autoSwitchLowQuota: false,
-  lowQuotaThreshold: 5,
-  oauthClientId: '',
-  oauthClientSecret: ''
-}
-
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let activeOAuthFlow: PendingOAuthFlow | null = null
-
-export function parseSettings(raw: Record<string, unknown>): PluginSettings {
-  const rawPoll =
-    typeof raw.pollSeconds === 'number' && Number.isFinite(raw.pollSeconds)
-      ? Math.max(0, Math.min(3600, Math.round(raw.pollSeconds)))
-      : DEFAULT_SETTINGS.pollSeconds
-  const poll = rawPoll === 0 ? 0 : Math.max(MIN_POLL_SECONDS, rawPoll)
-  const statusClickAction = raw.statusClickAction === 'switchBest' ? 'switchBest' : 'refresh'
-  const showAgyPool = raw.showAgyPool !== false
-  const autoSwitchLowQuota = raw.autoSwitchLowQuota === true
-  const lowQuotaThreshold =
-    typeof raw.lowQuotaThreshold === 'number' && Number.isFinite(raw.lowQuotaThreshold)
-      ? Math.max(1, Math.min(50, Math.round(raw.lowQuotaThreshold)))
-      : DEFAULT_SETTINGS.lowQuotaThreshold
-  return {
-    pollSeconds: poll,
-    statusClickAction,
-    showAgyPool,
-    autoSwitchLowQuota,
-    lowQuotaThreshold,
-    oauthClientId: typeof raw.oauthClientId === 'string' ? raw.oauthClientId.trim() : '',
-    oauthClientSecret: typeof raw.oauthClientSecret === 'string' ? raw.oauthClientSecret.trim() : ''
-  }
-}
 
 export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): void {
   const paths = deps.paths ?? resolvePlatformPaths()
@@ -97,6 +67,23 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   let latestSnapshot: AccountsSnapshot | null = null
   let refreshInFlight: Promise<AccountsSnapshot> | null = null
   let lastAutoSwitchAt = 0
+  const currentVersion = deps.pluginVersion ?? readInstalledPluginVersion()
+
+  async function runUpdateCheck(force = false): Promise<PluginUpdateInfo> {
+    const { info, shouldNotifyDesktop } = await runStoredUpdateCheck(orca.storage, {
+      enabled: settings.checkUpdates && deps.updateFetcher !== null,
+      force,
+      currentVersion,
+      fetcher: deps.updateFetcher ?? undefined
+    })
+    if (shouldNotifyDesktop && info.latestVersion) {
+      await safeHostCall('notifications.show', {
+        title: 'Account Switcher update available',
+        body: `Version v${info.latestVersion} is available (installed v${info.currentVersion}). Run "orca plugin update --all" or open GitHub in the Accounts panel.`
+      })
+    }
+    return info
+  }
 
   function getOAuthClient(): OAuthClientConfig | null {
     if (deps.oauthClient !== undefined) return deps.oauthClient
@@ -148,7 +135,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       const cliPath = resolveCli()
       const oauthClient = getOAuthClient()
       const vaultAccounts = settings.showAgyPool ? await listVaultAccounts(orca) : []
-      const [orcaRes, agyPool] = await Promise.all([
+      const [orcaRes, agyPool, update] = await Promise.all([
         fetchOrcaAccounts(cliPath, runner),
         settings.showAgyPool
           ? fetchAgyPoolState({
@@ -166,7 +153,8 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
               accounts: [],
               bestEmail: null,
               error: null
-            })
+            }),
+        runUpdateCheck(force)
       ])
 
       const snapshot: AccountsSnapshot = {
@@ -176,6 +164,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
         providers: orcaRes.providers,
         agyPool,
         diagnostics: collectDiagnostics(oauthClient),
+        update,
         fetchedAt: Date.now()
       }
       latestSnapshot = snapshot
@@ -355,9 +344,11 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
 
     const cached = await orca.storage.get<AccountsSnapshot>('lastSnapshot').catch(() => undefined)
     if (cached && typeof cached.fetchedAt === 'number' && Array.isArray(cached.providers)) {
+      const update = await runUpdateCheck(false)
       const hydrated: AccountsSnapshot = {
         ...cached,
-        diagnostics: collectDiagnostics()
+        diagnostics: collectDiagnostics(),
+        update
       }
       latestSnapshot = hydrated
       await updateStatusBar(hydrated)
@@ -375,6 +366,30 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   orca.panels.handle('accounts.snapshot', async (input) =>
     loadSnapshot(input?.refreshQuotas !== false, input?.force === true)
   )
+  orca.panels.handle('accounts.checkUpdate', async () => {
+    const update = await runUpdateCheck(true)
+    if (!latestSnapshot) return loadSnapshot(false)
+    const next: AccountsSnapshot = { ...latestSnapshot, update }
+    latestSnapshot = next
+    await orca.storage.set('lastSnapshot', next).catch(() => undefined)
+    orca.panels.post('accounts.updated', next)
+    return next
+  })
+  orca.panels.handle('accounts.dismissUpdate', async ({ version }) => {
+    const update = await dismissStoredUpdateVersion(
+      orca.storage,
+      version,
+      settings.checkUpdates && deps.updateFetcher !== null,
+      currentVersion,
+      deps.updateFetcher ?? undefined
+    )
+    if (!latestSnapshot) return loadSnapshot(false)
+    const next: AccountsSnapshot = { ...latestSnapshot, update }
+    latestSnapshot = next
+    await orca.storage.set('lastSnapshot', next).catch(() => undefined)
+    orca.panels.post('accounts.updated', next)
+    return next
+  })
   orca.panels.handle('accounts.selectOrca', async ({ agent, account }) => performOrcaSelect(agent, account))
   orca.panels.handle('accounts.selectAgyPool', async ({ email }) => performAgySwitch(email))
   orca.panels.handle('accounts.switchBestAgy', async () => performSwitchBest())

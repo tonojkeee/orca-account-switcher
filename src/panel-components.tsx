@@ -3,6 +3,7 @@ import {
   Badge,
   Box,
   Button,
+  Callout,
   Card,
   Code,
   Collapsible,
@@ -23,7 +24,8 @@ import type {
   OAuthStartResult,
   OrcaAgentKind,
   OrcaManagedAccount,
-  OrcaProviderState
+  OrcaProviderState,
+  PluginUpdateInfo
 } from './protocol'
 
 export function toneForQuota(pct: number | null): Tone {
@@ -327,21 +329,100 @@ export function OAuthConnectCard({
   )
 }
 
-export function DiagnosticsSection({ snap }: { snap: AccountsSnapshot }) {
-  const diag = snap.diagnostics
+export function UpdateBanner({
+  update,
+  onOpenRepo,
+  onDismiss
+}: {
+  update: PluginUpdateInfo
+  onOpenRepo: () => void
+  onDismiss: () => void
+}) {
+  if (!update.hasUpdate || update.dismissed || !update.latestVersion) return null
   return (
-    <Collapsible title="Runtime diagnostics" description="Detected CLIs, OAuth client source, and platform">
-      <KeyValue
-        label="Environment diagnostics"
-        items={[
-          { label: 'Platform', value: snap.platform, code: true },
-          { label: 'Orca CLI', value: diag?.orcaCliPath ?? (snap.orcaCliFound ? 'detected' : 'not found'), tone: snap.orcaCliFound ? 'success' : 'warning', code: true },
-          { label: 'AGY CLI', value: diag?.agyCliPath ?? 'not found', tone: diag?.agyCliPath ? 'success' : 'neutral', code: true },
-          { label: 'AGY Tools', value: diag?.agyToolsCliPath ?? 'optional (not installed)', code: true },
-          { label: 'OAuth Client', value: diag?.oauthClientSource ?? (snap.agyPool.oauthReady ? 'ready' : 'not configured'), tone: snap.agyPool.oauthReady ? 'success' : 'warning', code: true },
-          { label: 'Active AGY', value: snap.agyPool.activeEmail ?? 'none' }
-        ]}
-      />
+    <Callout tone="accent" title={`Update available: v${update.latestVersion}`} icon="download">
+      <Stack gap="xs">
+        <Text size="xs">
+          New version v{update.latestVersion} is available (installed v{update.currentVersion}).
+        </Text>
+        <Code>orca plugin update --all</Code>
+        <Row gap="xs" wrap>
+          <Button size="xs" variant="solid" tone="accent" icon="open-external" onPress={onOpenRepo}>
+            Open GitHub
+          </Button>
+          <Button size="xs" variant="ghost" onPress={onDismiss}>
+            Dismiss
+          </Button>
+        </Row>
+      </Stack>
+    </Callout>
+  )
+}
+
+export function DiagnosticsSection({
+  snap,
+  busyKey,
+  onCheckUpdate
+}: {
+  snap: AccountsSnapshot
+  busyKey: string | null
+  onCheckUpdate: () => void
+}) {
+  const diag = snap.diagnostics
+  const update = snap.update
+  const versionText = update
+    ? update.hasUpdate && update.latestVersion
+      ? `v${update.currentVersion} -> v${update.latestVersion} available`
+      : `v${update.currentVersion} (up to date)`
+    : 'unknown'
+
+  return (
+    <Collapsible title="Runtime diagnostics" description="Detected CLIs, OAuth client source, and version">
+      <Stack gap="sm">
+        <KeyValue
+          label="Environment diagnostics"
+          items={[
+            { label: 'Version', value: versionText, tone: update?.hasUpdate ? 'accent' : 'neutral', code: true },
+            { label: 'Platform', value: snap.platform, code: true },
+            {
+              label: 'Orca CLI',
+              value: diag?.orcaCliPath ?? (snap.orcaCliFound ? 'detected' : 'not found'),
+              tone: snap.orcaCliFound ? 'success' : 'warning',
+              code: true
+            },
+            {
+              label: 'AGY CLI',
+              value: diag?.agyCliPath ?? 'not found',
+              tone: diag?.agyCliPath ? 'success' : 'neutral',
+              code: true
+            },
+            { label: 'AGY Tools', value: diag?.agyToolsCliPath ?? 'optional (not installed)', code: true },
+            {
+              label: 'OAuth Client',
+              value: diag?.oauthClientSource ?? (snap.agyPool.oauthReady ? 'ready' : 'not configured'),
+              tone: snap.agyPool.oauthReady ? 'success' : 'warning',
+              code: true
+            },
+            { label: 'Active AGY', value: snap.agyPool.activeEmail ?? 'none' }
+          ]}
+        />
+        <Row gap="xs" align="center" wrap>
+          <Button
+            size="xs"
+            variant="outline"
+            icon="refresh"
+            disabled={busyKey !== null}
+            onPress={onCheckUpdate}
+          >
+            {busyKey === 'update-check' ? 'Checking…' : 'Check for updates'}
+          </Button>
+          {update?.error ? (
+            <Text size="xs" tone="warning">
+              Update check: {update.error}
+            </Text>
+          ) : null}
+        </Row>
+      </Stack>
     </Collapsible>
   )
 }

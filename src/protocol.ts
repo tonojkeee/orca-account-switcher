@@ -60,6 +60,16 @@ export type RuntimeDiagnostics = {
   oauthClientSource: string | null
 }
 
+export type PluginUpdateInfo = {
+  currentVersion: string
+  latestVersion: string | null
+  hasUpdate: boolean
+  dismissed: boolean
+  checkedAt: number | null
+  repoUrl: string
+  error: string | null
+}
+
 export type AccountsSnapshot = {
   platform: string
   orcaCliFound: boolean
@@ -67,6 +77,7 @@ export type AccountsSnapshot = {
   providers: OrcaProviderState[]
   agyPool: AgyPoolState
   diagnostics?: RuntimeDiagnostics
+  update?: PluginUpdateInfo
   fetchedAt: number
 }
 
@@ -92,6 +103,8 @@ declare module 'orca' {
     'accounts.cancelGoogleOAuth': { output: { ok: true } }
     'accounts.importCurrentAgy': { output: SwitchResult }
     'accounts.removeVaultAccount': { input: { email: string }; output: SwitchResult }
+    'accounts.checkUpdate': { output: AccountsSnapshot }
+    'accounts.dismissUpdate': { input: { version: string }; output: AccountsSnapshot }
   }
   interface PluginPanelEvents {
     'accounts.updated': AccountsSnapshot

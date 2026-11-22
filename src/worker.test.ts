@@ -27,7 +27,8 @@ test('worker imports current agy login into encrypted vault, switches agy + Orca
         autoSwitchLowQuota: false,
         lowQuotaThreshold: 5,
         oauthClientId: '',
-        oauthClientSecret: ''
+        oauthClientSecret: '',
+        checkUpdates: false
       }
     })
 
@@ -149,7 +150,7 @@ test('worker hydrates fresh cached lastSnapshot on init without extra quota API 
           { email: 'cached@gmail.com', name: 'Cached', source: 'oauth', addedAt: 1, refreshToken: 'rt-c' }
         ])
       },
-      settings: { pollSeconds: 0 }
+      settings: { pollSeconds: 0, checkUpdates: false }
     })
 
     const worker = await mountWorker(
@@ -174,6 +175,50 @@ test('worker hydrates fresh cached lastSnapshot on init without extra quota API 
     const snap = await worker.request('accounts.snapshot')
     assert.equal(snap.fetchedAt, cachedSnapshot.fetchedAt)
     assert.equal(snap.diagnostics?.orcaCliPath, '/usr/bin/orca')
+    await worker.deactivate()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('worker checks GitHub update once per version, shows notification, and supports dismiss', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-worker-update-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+
+    const host = mockHost({
+      settings: { pollSeconds: 0, showAgyPool: false, checkUpdates: true }
+    })
+
+    const worker = await mountWorker(
+      {
+        default: (orca) =>
+          main.default(orca, {
+            paths,
+            platform: 'other' as NodeJS.Platform,
+            findOrca: () => '/usr/bin/orca',
+            findAgy: () => null,
+            pluginVersion: '0.2.0',
+            runner: async () => ({ code: 0, stdout: '{"ok":true,"result":{}}', stderr: '' }),
+            updateFetcher: async () => ({ ok: true, status: 200, json: async () => ({ version: '0.2.5' }) })
+          }),
+        deactivate: main.deactivate
+      },
+      { host }
+    )
+
+    const snap = await worker.request('accounts.checkUpdate')
+    assert.equal(snap.update?.hasUpdate, true)
+    assert.equal(snap.update?.latestVersion, '0.2.5')
+    assert.equal(snap.update?.dismissed, false)
+    assert.ok(
+      host.callsOf('notifications.show').some((c) => JSON.stringify(c).includes('0.2.5'))
+    )
+
+    const dismissed = await worker.request('accounts.dismissUpdate', { version: '0.2.5' })
+    assert.equal(dismissed.update?.dismissed, true)
     await worker.deactivate()
   } finally {
     rmSync(home, { recursive: true, force: true })

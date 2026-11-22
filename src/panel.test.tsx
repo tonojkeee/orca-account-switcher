@@ -99,22 +99,40 @@ function makeSnapshot(activeOrcaId: string): AccountsSnapshot {
       agyCliPath: '/usr/local/bin/agy',
       agyToolsCliPath: null,
       oauthClientSource: 'orca-acp'
+    },
+    update: {
+      currentVersion: '0.2.0',
+      latestVersion: '0.2.5',
+      hasUpdate: true,
+      dismissed: false,
+      checkedAt: Date.now(),
+      repoUrl: 'https://github.com/tonojkeee/orca-account-switcher',
+      error: null
     }
   }
 }
 
-test('panel renders Orca accounts + AGY Vault, diagnostics, filter, and actions cleanly', async () => {
+test('panel renders Orca accounts + AGY Vault, update banner, diagnostics, and filter cleanly', async () => {
   let active = 'ag-1'
+  let dismissed = false
+  const makeCurrent = () => {
+    const base = makeSnapshot(active)
+    return { ...base, update: { ...base.update!, dismissed } }
+  }
   const host = mockHost({
     requests: {
-      'accounts.snapshot': () => makeSnapshot(active),
+      'accounts.snapshot': () => makeCurrent(),
       'accounts.selectOrca': ({ account }) => {
         active = account
-        return { ok: true, message: `Switched antigravity to ${account}`, snapshot: makeSnapshot(active) }
+        return { ok: true, message: `Switched antigravity to ${account}`, snapshot: makeCurrent() }
       },
       'accounts.switchBestAgy': () => {
         active = 'ag-2'
-        return { ok: true, message: 'Switched agy CLI + Orca ACP to two@gmail.com', snapshot: makeSnapshot(active) }
+        return { ok: true, message: 'Switched agy CLI + Orca ACP to two@gmail.com', snapshot: makeCurrent() }
+      },
+      'accounts.dismissUpdate': () => {
+        dismissed = true
+        return makeCurrent()
       },
       'accounts.beginGoogleOAuth': () => ({
         authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?mock=1',
@@ -128,6 +146,11 @@ test('panel renders Orca accounts + AGY Vault, diagnostics, filter, and actions 
   assert.ok(view.find({ text: /one@gmail\.com/ }))
   assert.ok(view.find({ text: /two@gmail\.com/ }))
   assert.ok(view.find({ type: 'Collapsible' }))
+  assert.ok(view.find({ text: /Update available: v0\.2\.5/ }))
+
+  // Dismiss update banner
+  await view.press({ text: 'Dismiss' })
+  assert.equal(view.find({ text: /Update available: v0\.2\.5/ }), null)
 
   // Expand Runtime diagnostics Collapsible and verify detected paths render
   await view.toggle({ type: 'Collapsible' })

@@ -90,12 +90,18 @@ orca plugin dev load . --approve ap1-<ваш_fingerprint>
 
 ---
 
-## Настройки безопасности и квот
+## Настройки безопасности, обновлений и квот
 
 В **Orca Settings → Plugins → Account Switcher**:
 - **Auto-refresh interval (`pollSeconds`)**: по умолчанию `0` (обновление квот **только вручную** по кнопке **Refresh** / **Best**, чтобы не создавать лишних фоновых запросов с одного IP). При включении автоопроса минимум — `600` секунд.
 - **Status bar click action**: действие по клику в статус-баре (`Refresh` или `Switch to Best`).
 - **Auto-switch Antigravity on low quota**: по умолчанию выключено (`false`).
+- **Check for plugin updates (`checkUpdates`)**: по умолчанию включено (`true`) — раз в 6 часов проверяет свежую версию `orca-plugin.json` в GitHub; при выходе новой версии показывает системное уведомление (1 раз на версию) и баннер в панели с командой обновления:
+  ```bash
+  orca plugin update --all
+  # для локальной dev-папки:
+  git pull && orca plugin dev reload .
+  ```
 
 ---
 

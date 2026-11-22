@@ -26,7 +26,8 @@ import {
   AgyPoolRow,
   DiagnosticsSection,
   OAuthConnectCard,
-  ProviderSection
+  ProviderSection,
+  UpdateBanner
 } from './panel-components'
 import type { AccountsSnapshot, OAuthStartResult, SwitchResult } from './protocol'
 
@@ -223,6 +224,25 @@ export default function Panel() {
         </Callout>
       ) : null}
 
+      {snap.update ? (
+        <UpdateBanner
+          update={snap.update}
+          onOpenRepo={() => {
+            void shell.openExternal(snap.update!.repoUrl).catch(() => undefined)
+          }}
+          onDismiss={() => {
+            const ver = snap.update?.latestVersion
+            if (!ver || read(busyKeyAtom) !== null) return
+            set(busyKeyAtom, 'update-dismiss')
+            void plugin
+              .request('accounts.dismissUpdate', { version: ver })
+              .then((next) => set(snapshotAtom, next))
+              .catch(() => undefined)
+              .finally(() => set(busyKeyAtom, null))
+          }}
+        />
+      ) : null}
+
       <Tabs label="Account source" value={tab} onChange={(next) => set(activeTabAtom, next)}>
         <Tab value="orca" label="Orca Agents" icon="agent">
           <Stack gap="sm">
@@ -332,7 +352,34 @@ export default function Panel() {
         </Tab>
       </Tabs>
 
-      <DiagnosticsSection snap={snap} />
+      <DiagnosticsSection
+        snap={snap}
+        busyKey={busyKey}
+        onCheckUpdate={() => {
+          if (read(busyKeyAtom) !== null) return
+          set(busyKeyAtom, 'update-check')
+          void plugin
+            .request('accounts.checkUpdate')
+            .then((next) => {
+              set(snapshotAtom, next)
+              set(feedbackAtom, {
+                tone: next.update?.hasUpdate ? 'accent' : next.update?.error ? 'warning' : 'success',
+                text: next.update?.hasUpdate
+                  ? `Update available: v${next.update.latestVersion} (current v${next.update.currentVersion})`
+                  : next.update?.error
+                    ? `Update check failed: ${next.update.error}`
+                    : `You are on the latest version (v${next.update?.currentVersion ?? 'current'})`
+              })
+            })
+            .catch((error) => {
+              set(feedbackAtom, {
+                tone: 'danger',
+                text: error instanceof Error ? error.message : 'Update check failed'
+              })
+            })
+            .finally(() => set(busyKeyAtom, null))
+        }}
+      />
     </Stack>
   )
 }
