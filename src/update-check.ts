@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { StorageApi } from 'orca'
 import type { HttpFetcher } from './oauth'
+import type { CommandRunner } from './orca-cli'
 import { asRecord, asString } from './parse'
 import type { PluginUpdateInfo } from './protocol'
 
@@ -228,4 +229,142 @@ export async function dismissStoredUpdateVersion(
     fetcher
   })
   return { ...info, dismissed: true }
+}
+
+type InstalledPluginEntry = {
+  pluginKey: string
+  isDev: boolean
+  folderPath: string | null
+}
+
+function findInstalledPluginEntry(stdout: string): InstalledPluginEntry | null {
+  try {
+    const root = asRecord(JSON.parse(stdout))
+    const result = asRecord(root?.result)
+    const plugins = Array.isArray(result?.plugins) ? result.plugins : []
+    const matches: InstalledPluginEntry[] = []
+
+    for (const raw of plugins) {
+      const p = asRecord(raw)
+      const pluginKey = asString(p?.pluginKey)
+      if (!pluginKey) continue
+      const repo = asString(p?.repository) ?? ''
+      if (pluginKey.endsWith('.account-switcher') || repo.includes('orca-account-switcher')) {
+        const src = asRecord(p?.source)
+        const folderPath =
+          asString(src?.path) ??
+          (asString(src?.kind) === 'folder' ? asString(src?.reference) : null)
+        matches.push({
+          pluginKey,
+          isDev: p?.isDev === true,
+          folderPath
+        })
+      }
+    }
+
+    // Prefer non-dev installed instance (normal end-user setup), else fall back to dev plugin.
+    return matches.find((m) => !m.isDev) ?? matches[0] ?? null
+  } catch {
+    return null
+  }
+}
+
+function extractCliErrorDetails(stdout: string, stderr: string): {
+  code: string | null
+  message: string
+  fingerprint: string | null
+} {
+  try {
+    const parsed = asRecord(JSON.parse(stdout))
+    const err = asRecord(parsed?.error)
+    const data = asRecord(err?.data)
+    const msg = asString(err?.message) ?? (stderr.trim() || stdout.trim() || 'Update failed')
+    const fpMatch = /ap1-[A-Za-z0-9_-]+/.exec(stdout) ?? /ap1-[A-Za-z0-9_-]+/.exec(stderr)
+    return {
+      code: asString(err?.code),
+      message: msg,
+      fingerprint: asString(data?.fingerprint) ?? fpMatch?.[0] ?? null
+    }
+  } catch {
+    const combined = `${stdout}\n${stderr}`.trim()
+    const fpMatch = /ap1-[A-Za-z0-9_-]+/.exec(combined)
+    return {
+      code: null,
+      message: stderr.trim() || stdout.trim() || 'Update command failed',
+      fingerprint: fpMatch?.[0] ?? null
+    }
+  }
+}
+
+function resolveDefaultPluginRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+}
+
+/**
+ * Cross-platform self-update using Orca's official CLI (`orca plugin update <key> --json`,
+ * or `orca plugin dev reload <dir>` when running in dev mode). Never auto-bypasses `--approve`.
+ */
+export async function applyPluginSelfUpdate(options: {
+  cliPath: string | null
+  runner: CommandRunner
+  pluginRoot?: string
+}): Promise<{ ok: boolean; message: string; requiresApproval?: boolean }> {
+  const { cliPath, runner } = options
+  if (!cliPath) {
+    return { ok: false, message: 'Orca CLI was not found on this machine.' }
+  }
+
+  const listRes = await runner(cliPath, ['plugin', 'list', '--json'], 15000)
+  const entry = listRes.code === 0 ? findInstalledPluginEntry(listRes.stdout) : null
+
+  if (entry?.isDev) {
+    const rootDir = options.pluginRoot ?? resolveDefaultPluginRoot()
+    const reloadRes = await runner(cliPath, ['plugin', 'dev', 'reload', rootDir], 30000)
+    if (reloadRes.code === 0) {
+      return {
+        ok: true,
+        message: 'Dev plugin reloaded from disk (pull git changes locally if needed).'
+      }
+    }
+    const err = extractCliErrorDetails(reloadRes.stdout, reloadRes.stderr)
+    return { ok: false, message: err.message }
+  }
+
+  if (entry?.folderPath && existsSync(path.join(entry.folderPath, '.git'))) {
+    // Best-effort fast-forward pull for local git folder installs before re-copying.
+    await runner('git', ['-C', entry.folderPath, 'pull', '--ff-only'], 30000).catch(() => undefined)
+  }
+
+  const updateArgs = entry
+    ? ['plugin', 'update', entry.pluginKey, '--json']
+    : ['plugin', 'update', '--all', '--json']
+  const res = await runner(cliPath, updateArgs, 60000)
+
+  if (res.code === 0) {
+    try {
+      const parsed = asRecord(JSON.parse(res.stdout))
+      if (parsed?.ok !== false) {
+        return { ok: true, message: 'Plugin updated cleanly! Reloading snapshot…' }
+      }
+    } catch {
+      return { ok: true, message: 'Plugin updated cleanly! Reloading snapshot…' }
+    }
+  }
+
+  const details = extractCliErrorDetails(res.stdout, res.stderr)
+  const needsApproval =
+    res.code === 3 || details.code === 'approval_required' || details.code === 'approval_stale'
+  if (needsApproval) {
+    const target = entry?.pluginKey ?? '--all'
+    const approveHint = details.fingerprint
+      ? `orca plugin update ${target} --approve ${details.fingerprint}`
+      : `orca plugin update ${target} --approve <fingerprint>`
+    return {
+      ok: false,
+      requiresApproval: true,
+      message: `Permission approval needed. Run in terminal: ${approveHint}`
+    }
+  }
+
+  return { ok: false, message: details.message }
 }

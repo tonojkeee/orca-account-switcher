@@ -31,6 +31,7 @@ import {
 import type { AccountsSnapshot, OrcaAgentKind, PluginUpdateInfo, SwitchResult } from './protocol'
 import { buildStatusBarState } from './status'
 import {
+  applyPluginSelfUpdate,
   dismissStoredUpdateVersion,
   readInstalledPluginVersion,
   runStoredUpdateCheck
@@ -410,6 +411,11 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     await orca.storage.set('lastSnapshot', next).catch(() => undefined)
     orca.panels.post('accounts.updated', next)
     return next
+  })
+  orca.panels.handle('accounts.applyUpdate', async () => {
+    const res = await applyPluginSelfUpdate({ cliPath: resolveCli(), runner })
+    const snapshot = await loadSnapshot(false, res.ok)
+    return { ok: res.ok, message: res.message, snapshot }
   })
   orca.panels.handle('accounts.selectOrca', async ({ agent, account }) => performOrcaSelect(agent, account))
   orca.panels.handle('accounts.selectAgyPool', async ({ email }) => performAgySwitch(email))

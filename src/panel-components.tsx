@@ -369,10 +369,14 @@ export function LaunchLockBanner({
 
 export function UpdateBanner({
   update,
+  busyKey,
+  onApplyUpdate,
   onOpenRepo,
   onDismiss
 }: {
   update: PluginUpdateInfo
+  busyKey: string | null
+  onApplyUpdate: () => void
   onOpenRepo: () => void
   onDismiss: () => void
 }) {
@@ -383,12 +387,21 @@ export function UpdateBanner({
         <Text size="xs">
           New version v{update.latestVersion} is available (installed v{update.currentVersion}).
         </Text>
-        <Code>orca plugin update --all</Code>
         <Row gap="xs" wrap>
-          <Button size="xs" variant="solid" tone="accent" icon="open-external" onPress={onOpenRepo}>
-            Open GitHub
+          <Button
+            size="xs"
+            variant="solid"
+            tone="accent"
+            icon="download"
+            disabled={busyKey !== null}
+            onPress={onApplyUpdate}
+          >
+            {busyKey === 'update-apply' ? 'Updating…' : 'Update now'}
           </Button>
-          <Button size="xs" variant="ghost" onPress={onDismiss}>
+          <Button size="xs" variant="outline" icon="open-external" onPress={onOpenRepo}>
+            GitHub
+          </Button>
+          <Button size="xs" variant="ghost" disabled={busyKey !== null} onPress={onDismiss}>
             Dismiss
           </Button>
         </Row>
@@ -400,11 +413,13 @@ export function UpdateBanner({
 export function DiagnosticsSection({
   snap,
   busyKey,
-  onCheckUpdate
+  onCheckUpdate,
+  onApplyUpdate
 }: {
   snap: AccountsSnapshot
   busyKey: string | null
   onCheckUpdate: () => void
+  onApplyUpdate: () => void
 }) {
   const diag = snap.diagnostics
   const update = snap.update
@@ -452,7 +467,21 @@ export function DiagnosticsSection({
             disabled={busyKey !== null}
             onPress={onCheckUpdate}
           >
-            {busyKey === 'update-check' ? 'Checking…' : 'Check for updates'}
+            {busyKey === 'update-check' ? 'Checking…' : 'Check updates'}
+          </Button>
+          <Button
+            size="xs"
+            variant={update?.hasUpdate ? 'solid' : 'outline'}
+            tone={update?.hasUpdate ? 'accent' : 'neutral'}
+            icon="download"
+            disabled={busyKey !== null}
+            onPress={onApplyUpdate}
+          >
+            {busyKey === 'update-apply'
+              ? 'Updating…'
+              : update?.hasUpdate && update.latestVersion
+                ? `Update to v${update.latestVersion}`
+                : 'Update plugin'}
           </Button>
           {update?.error ? (
             <Text size="xs" tone="warning">

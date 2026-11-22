@@ -138,6 +138,10 @@ test('panel renders Orca accounts + AGY Vault, update banner, diagnostics, and f
         dismissed = true
         return makeCurrent()
       },
+      'accounts.applyUpdate': () => {
+        dismissed = true
+        return { ok: true, message: 'Plugin updated cleanly!', snapshot: makeCurrent() }
+      },
       'accounts.beginGoogleOAuth': () => ({
         authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?mock=1',
         redirectUri: 'http://127.0.0.1:4444/auth/callback'
@@ -156,9 +160,12 @@ test('panel renders Orca accounts + AGY Vault, update banner, diagnostics, and f
   await view.press({ text: 'Dismiss' })
   assert.equal(view.find({ text: /Update available: v0\.2\.5/ }), null)
 
-  // Expand Runtime diagnostics Collapsible and verify detected paths render
+  // Expand Runtime diagnostics Collapsible and verify detected paths + Update button render
   await view.toggle({ type: 'Collapsible' })
   assert.ok(view.find({ text: /\/usr\/local\/bin\/orca/ }))
+  assert.ok(view.find({ text: /Update to v0\.2\.5/ }))
+  await view.press({ text: /Update to v0\.2\.5/ })
+  assert.ok(view.find({ text: /Plugin updated cleanly!/ }))
 
   await view.press({ text: 'Best' })
   assert.ok(view.find({ text: /Switched agy CLI \+ Orca ACP to two@gmail\.com/ }))

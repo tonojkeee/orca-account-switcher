@@ -113,6 +113,7 @@ declare module 'orca' {
     'accounts.removeVaultAccount': { input: { email: string }; output: SwitchResult }
     'accounts.checkUpdate': { output: AccountsSnapshot }
     'accounts.dismissUpdate': { input: { version: string }; output: AccountsSnapshot }
+    'accounts.applyUpdate': { output: SwitchResult }
   }
   interface PluginPanelEvents {
     'accounts.updated': AccountsSnapshot

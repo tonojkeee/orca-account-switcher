@@ -1,5 +1,10 @@
 import { assert, test } from 'orca/testing'
-import { checkForPluginUpdate, compareSemver, UPDATE_CHECK_TTL_MS } from './update-check'
+import {
+  applyPluginSelfUpdate,
+  checkForPluginUpdate,
+  compareSemver,
+  UPDATE_CHECK_TTL_MS
+} from './update-check'
 
 test('compareSemver compares major, minor, patch, and prerelease tags accurately', () => {
   assert.equal(compareSemver('0.2.1', '0.2.0'), 1)
@@ -51,4 +56,59 @@ test('checkForPluginUpdate respects 6h cache TTL and emits one-time desktop noti
   })
   assert.equal(networkCalls, 2)
   assert.equal(third.shouldNotifyDesktop, false)
+})
+
+test('applyPluginSelfUpdate invokes orca plugin update for installed key and reports approval hints', async () => {
+  const calls: string[][] = []
+  const okRes = await applyPluginSelfUpdate({
+    cliPath: 'C:\\Orca\\orca.cmd',
+    runner: async (_exe, args) => {
+      calls.push([...args])
+      if (args[1] === 'list') {
+        return {
+          code: 0,
+          stderr: '',
+          stdout: JSON.stringify({
+            ok: true,
+            result: {
+              plugins: [{ pluginKey: 'tonojkeee.account-switcher', isDev: false }]
+            }
+          })
+        }
+      }
+      return { code: 0, stderr: '', stdout: '{"ok":true}' }
+    }
+  })
+  assert.equal(okRes.ok, true)
+  assert.deepEqual(calls, [
+    ['plugin', 'list', '--json'],
+    ['plugin', 'update', 'tonojkeee.account-switcher', '--json']
+  ])
+
+  const approvalRes = await applyPluginSelfUpdate({
+    cliPath: '/bin/orca',
+    runner: async (_exe, args) => {
+      if (args[1] === 'list') {
+        return {
+          code: 0,
+          stderr: '',
+          stdout: JSON.stringify({
+            ok: true,
+            result: { plugins: [{ pluginKey: 'tonojkeee.account-switcher', isDev: false }] }
+          })
+        }
+      }
+      return {
+        code: 3,
+        stderr: '',
+        stdout: JSON.stringify({
+          ok: false,
+          error: { code: 'approval_required', message: 'Needs approval', data: { fingerprint: 'ap1-xyz' } }
+        })
+      }
+    }
+  })
+  assert.equal(approvalRes.ok, false)
+  assert.equal(approvalRes.requiresApproval, true)
+  assert.ok(approvalRes.message.includes('orca plugin update tonojkeee.account-switcher --approve ap1-xyz'))
 })

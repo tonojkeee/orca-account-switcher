@@ -124,6 +124,35 @@ async function cancelOAuthFlow(): Promise<void> {
   await plugin.request('accounts.cancelGoogleOAuth').catch(() => undefined)
 }
 
+async function applyPluginUpdate(): Promise<void> {
+  if (read(busyKeyAtom) !== null) return
+  set(busyKeyAtom, 'update-apply')
+  set(feedbackAtom, { tone: 'neutral', text: 'Updating plugin via Orca CLI…' })
+  try {
+    const res = await plugin.request('accounts.applyUpdate')
+    set(snapshotAtom, res.snapshot)
+    set(feedbackAtom, { tone: res.ok ? 'success' : 'warning', text: res.message })
+  } catch (error) {
+    // Orca may restart the plugin worker mid-call while replacing the installed version.
+    await new Promise((r) => setTimeout(r, 900))
+    try {
+      const fresh = await plugin.request('accounts.snapshot', { refreshQuotas: false })
+      set(snapshotAtom, fresh)
+      set(feedbackAtom, {
+        tone: 'success',
+        text: `Plugin updated (v${fresh.update?.currentVersion ?? 'latest'}) and reloaded.`
+      })
+    } catch {
+      set(feedbackAtom, {
+        tone: 'danger',
+        text: error instanceof Error ? error.message : 'Plugin update failed'
+      })
+    }
+  } finally {
+    set(busyKeyAtom, null)
+  }
+}
+
 export function setup(ctx: PanelContext): void {
   ctx.subscriptions.push(
     plugin.on('accounts.updated', (snap) => {
@@ -240,6 +269,8 @@ export default function Panel() {
       {snap.update ? (
         <UpdateBanner
           update={snap.update}
+          busyKey={busyKey}
+          onApplyUpdate={() => void applyPluginUpdate()}
           onOpenRepo={() => {
             void shell.openExternal(snap.update!.repoUrl).catch(() => undefined)
           }}
@@ -368,6 +399,7 @@ export default function Panel() {
       <DiagnosticsSection
         snap={snap}
         busyKey={busyKey}
+        onApplyUpdate={() => void applyPluginUpdate()}
         onCheckUpdate={() => {
           if (read(busyKeyAtom) !== null) return
           set(busyKeyAtom, 'update-check')
