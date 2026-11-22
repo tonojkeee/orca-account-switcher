@@ -62,20 +62,32 @@ test('findOrcaCli discovers PATH and platform fallback binaries', () => {
   )
 })
 
-test('sanitizeChildEnv strips ELECTRON_RUN_AS_NODE and buildCommandInvocation wraps Windows .cmd', () => {
-  const clean = sanitizeChildEnv({ PATH: '/usr/bin', ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '--inspect' })
+test('sanitizeChildEnv strips ELECTRON_RUN_AS_NODE and buildCommandInvocation wraps Windows .cmd verbatim', () => {
+  const clean = sanitizeChildEnv({
+    PATH: '/usr/bin',
+    ELECTRON_RUN_AS_NODE: '1',
+    NODE_OPTIONS: '--inspect',
+    ORCA_CLI_COMMAND: 'C:\\orca.cmd',
+    ORCA_CLI_HANDOFF: 'C:\\orca.cmd'
+  })
   assert.equal(clean.ELECTRON_RUN_AS_NODE, undefined)
   assert.equal(clean.NODE_OPTIONS, undefined)
+  assert.equal(clean.ORCA_CLI_COMMAND, undefined)
+  assert.equal(clean.ORCA_CLI_HANDOFF, undefined)
   assert.equal(clean.PATH, '/usr/bin')
 
-  const winCmd = buildCommandInvocation('C:\\Orca\\orca.cmd', ['account', 'list', '--json'], 'win32', {
+  const winCmd = buildCommandInvocation('C:\\Program Files\\Orca\\orca.cmd', ['account', 'list', '--json'], 'win32', {
     ComSpec: 'C:\\Windows\\System32\\cmd.exe'
   })
   assert.equal(winCmd.program, 'C:\\Windows\\System32\\cmd.exe')
-  assert.deepEqual(winCmd.args, ['/d', '/s', '/c', 'C:\\Orca\\orca.cmd', 'account', 'list', '--json'])
+  assert.equal(winCmd.windowsVerbatimArguments, true)
+  assert.deepEqual(winCmd.args, [
+    '/d /v:off /s /c ""C:\\Program Files\\Orca\\orca.cmd" "account" "list" "--json""'
+  ])
 
   const winExe = buildCommandInvocation('C:\\Orca\\orca.exe', ['account', 'list'], 'win32', {})
   assert.equal(winExe.program, 'C:\\Orca\\orca.exe')
+  assert.equal(winExe.windowsVerbatimArguments, undefined)
   assert.deepEqual(winExe.args, ['account', 'list'])
 })
 

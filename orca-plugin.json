@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "account-switcher",
   "name": "Account Switcher",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Cross-platform on-the-fly account switcher for Orca managed agents, agy CLI, and built-in Google OAuth vault with live quotas.",
   "license": "MIT",
   "repository": "https://github.com/tonojkeee/orca-account-switcher",

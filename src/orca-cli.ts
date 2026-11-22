@@ -170,12 +170,14 @@ export async function fetchOrcaAccounts(
     }
   }
 
-  const res = await runner(cliPath, ['account', 'list', '--json'], 15000)
+  const res = await runner(cliPath, ['account', 'list', '--json'], 30000)
   if (res.code !== 0) {
     return {
       cliFound: true,
       providers: [],
-      error: res.stderr.trim() || res.stdout.trim() || `orca account list exited with code ${res.code}`
+      error:
+        extractCliError(res.stdout) ??
+        (res.stderr.trim() || res.stdout.trim() || `orca account list exited with code ${res.code}`)
     }
   }
 

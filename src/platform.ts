@@ -1,5 +1,5 @@
 // Cross-platform OS path discovery, sanitized command execution, and atomic file primitives.
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -19,7 +19,9 @@ export type PlatformPaths = {
 const STRIPPED_WORKER_ENV_VARS = [
   'ELECTRON_RUN_AS_NODE',
   'NODE_OPTIONS',
-  'NODE_REPL_EXTERNAL_MODULE'
+  'NODE_REPL_EXTERNAL_MODULE',
+  'ORCA_CLI_COMMAND',
+  'ORCA_CLI_HANDOFF'
 ] as const
 
 function pathFor(platform: PlatformKind) {
@@ -226,16 +228,42 @@ export type ExecResult = {
   stderr: string
 }
 
-/** Build executable + arguments so Windows `.cmd`/`.bat` scripts run without shell injection. */
+function quoteWindowsCmdArg(arg: string): string {
+  if (arg.length > 0 && !/[\\"% \t]/.test(arg)) return `"${arg}"`
+  let out = '"'
+  let backslashes = 0
+  for (const ch of arg) {
+    if (ch === '\\') {
+      backslashes += 1
+      continue
+    }
+    if (ch === '"') {
+      out += `${'\\'.repeat(backslashes * 2)}""`
+      backslashes = 0
+      continue
+    }
+    if (ch === '%') {
+      out += `${'\\'.repeat(backslashes * 2)}"^%"`
+      backslashes = 0
+      continue
+    }
+    out += `${'\\'.repeat(backslashes)}${ch}`
+    backslashes = 0
+  }
+  return `${out}${'\\'.repeat(backslashes * 2)}"`
+}
+
+/** Build executable + arguments so Windows `.cmd`/`.bat` scripts run verbatim through cmd.exe even with spaces/quotes. */
 export function buildCommandInvocation(
   executable: string,
   args: readonly string[],
   platform: PlatformKind = process.platform,
   env: NodeJS.ProcessEnv = process.env
-): { program: string; args: string[] } {
+): { program: string; args: string[]; windowsVerbatimArguments?: boolean } {
   if (platform === 'win32' && /\.(?:cmd|bat)$/i.test(executable)) {
     const comspec = env.ComSpec?.trim() || env.COMSPEC?.trim() || 'cmd.exe'
-    return { program: comspec, args: ['/d', '/s', '/c', executable, ...args] }
+    const cmdLine = `/d /v:off /s /c "${[executable, ...args].map(quoteWindowsCmdArg).join(' ')}"`
+    return { program: comspec, args: [cmdLine], windowsVerbatimArguments: true }
   }
   return { program: executable, args: [...args] }
 }
@@ -248,28 +276,50 @@ export function runCommand(
 ): Promise<ExecResult> {
   const inv = buildCommandInvocation(executable, args)
   return new Promise((resolve) => {
-    execFile(
-      inv.program,
-      inv.args,
-      {
-        env: sanitizeChildEnv(process.env),
-        timeout: timeoutMs,
-        maxBuffer: 4 * 1024 * 1024,
-        windowsHide: true
-      },
-      (error, stdout, stderr) => {
-        if (!error) {
-          resolve({ code: 0, stdout: String(stdout), stderr: String(stderr) })
-          return
-        }
-        const errCode = typeof (error as { code?: unknown }).code === 'number' ? ((error as { code: number }).code) : 1
-        resolve({
-          code: errCode,
-          stdout: String(stdout ?? ''),
-          stderr: String(stderr || error.message || 'Command failed')
-        })
+    const child = spawn(inv.program, inv.args, {
+      env: sanitizeChildEnv(process.env),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      ...(inv.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
+    })
+
+    const maxBytes = 4 * 1024 * 1024
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+    let settled = false
+
+    const finish = (code: number, fallbackErr?: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      const cleanStderr = stderr.trim() || fallbackErr || ''
+      resolve({ code, stdout, stderr: cleanStderr })
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        child.kill()
+      } catch {
+        // Ignore kill error
       }
-    )
+      finish(124, `Command timed out after ${Math.round(timeoutMs / 1000)}s: ${executable}`)
+    }, timeoutMs)
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (stdout.length < maxBytes) stdout += chunk.toString('utf8')
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < maxBytes) stderr += chunk.toString('utf8')
+    })
+    child.on('error', (err) => {
+      finish(1, err.message)
+    })
+    child.on('close', (code) => {
+      if (timedOut) return
+      finish(typeof code === 'number' ? code : 1)
+    })
   })
 }
 
