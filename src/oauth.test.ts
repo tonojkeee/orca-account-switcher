@@ -4,9 +4,12 @@ import path from 'node:path'
 import { assert, test } from 'orca/testing'
 import {
   buildGoogleAuthUrl,
+  clearOAuthClientCache,
   exchangeAuthorizationCode,
   parseCallbackInput,
+  refreshWithOAuthCandidates,
   resolveOAuthClient,
+  resolveOAuthClientCandidates,
   startLoopbackOAuthFlow
 } from './oauth'
 import { resolvePlatformPaths } from './platform'
@@ -139,5 +142,64 @@ test('startLoopbackOAuthFlow completes end-to-end callback exchange with injecte
     assert.deepEqual(outcomes[0], { ok: true, email: 'loop@gmail.com' })
   } finally {
     flow.close()
+  }
+})
+
+test('extracts exact 35-char GOCSPX secrets from Go .rodata concatenated strings and retries on invalid_client', async () => {
+  clearOAuthClientCache()
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-oauth-bin-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+
+    // Simulate Go binary .rodata where secrets are concatenated directly against "https://" and "cloudcode-pa.sandbox"
+    const sec0 = 'GOCSPX-' + 'a'.repeat(28)
+    const sec1 = 'GOCSPX-' + 'b'.repeat(28)
+    const id0 = '884354919052-abcdef123456.apps.googleusercontent.com'
+    const id1 = '1071006060591-zyxwvu654321.apps.googleusercontent.com'
+    const fakeBin = path.join(home, 'agy.exe')
+    writeFileSync(
+      fakeBin,
+      `PRE${sec0}https://cloudcode-pa${sec1}cloudcode-pa.sandbox` + '\0'.repeat(9000) + `${id0}SetUser${id1}GetHub`
+    )
+
+    // Prioritize prod 1071006060591 slot with clean 35-char secret (without trailing "cloudcode-pa")
+    const primary = resolveOAuthClient(paths, {}, fakeBin)
+    assert.equal(primary?.clientId, id1)
+    assert.equal(primary?.clientSecret, sec1)
+    assert.equal(primary?.clientSecret.length, 35)
+
+    // Simulate a poisoned acp_token.json written earlier + valid binary fallback
+    writeFileSync(
+      paths.orcaAcpTokenPath,
+      JSON.stringify({ client_id: id0, client_secret: 'GOCSPX-' + 'c'.repeat(28) + 'cloudcode-pa' })
+    )
+    const candidates = resolveOAuthClientCandidates(paths, {}, fakeBin)
+    assert.ok(candidates.some((c) => c.clientSecret === 'GOCSPX-' + 'c'.repeat(28)))
+    assert.ok(candidates.some((c) => c.clientId === id1 && c.clientSecret === sec1))
+
+    // refreshWithOAuthCandidates skips candidates rejected with invalid_client and remembers working one
+    const seenSecrets: string[] = []
+    const refreshed = await refreshWithOAuthCandidates(candidates, 'rt-1', async (_url, init) => {
+      const params = new URLSearchParams(String(init?.body))
+      const cid = params.get('client_id') ?? ''
+      const csec = params.get('client_secret') ?? ''
+      seenSecrets.push(csec)
+      if (cid === id1 && csec === sec1) {
+        return { ok: true, status: 200, json: async () => ({ access_token: 'at-ok', expires_in: 3600 }) }
+      }
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'invalid_client', error_description: 'The provided client secret is invalid.' })
+      }
+    })
+    assert.equal(refreshed.accessToken, 'at-ok')
+    assert.equal(refreshed.client.clientId, id1)
+    assert.ok(seenSecrets.length >= 2)
+  } finally {
+    clearOAuthClientCache()
+    rmSync(home, { recursive: true, force: true })
   }
 })

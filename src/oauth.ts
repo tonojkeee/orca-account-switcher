@@ -5,7 +5,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { decodeJwtPayload } from './keyring'
 import { asString } from './parse'
-import { findAgyCli, readJsonObject, type PlatformPaths } from './platform'
+import { findAgyCliCandidates, readJsonObject, type PlatformPaths } from './platform'
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
@@ -51,31 +51,62 @@ export type HttpFetcher = (
   init?: RequestInit
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>
 
+let cachedWorkingClient: OAuthClientConfig | null = null
+
+export function clearOAuthClientCache(): void {
+  cachedWorkingClient = null
+}
+
+function sanitizeGoogleSecret(secret: string): string[] {
+  const m = /^GOCSPX-[A-Za-z0-9_-]{28}/.exec(secret)
+  if (m && m[0] !== secret) {
+    // Recover cleanly if a prior version wrote Go-concatenated trailing chars into acp_token.json.
+    return [m[0], secret]
+  }
+  return [secret]
+}
+
 /**
- * Resolve Google Desktop OAuth client credentials from local runtime artifacts without hardcoding secrets:
- * 1) Explicit plugin settings override, 2) Orca acp_token.json, 3) ~/.gemini/oauth_creds.json, 4) local `agy` binary.
+ * Resolve ordered Google Desktop OAuth client candidates without hardcoding secrets:
+ * 1) Explicit settings override, 2) Cached working client, 3) Orca acp_token.json,
+ * 4) ~/.gemini/oauth_creds.json, 5) local `agy` binary pairs (with 35-char GOCSPX bounds).
  */
-export function resolveOAuthClient(
+export function resolveOAuthClientCandidates(
   paths: PlatformPaths,
   settings: { oauthClientId?: string; oauthClientSecret?: string } = {},
-  agyBin: string | null = findAgyCli()
-): OAuthClientConfig | null {
+  agyBin: string | null | undefined = undefined
+): OAuthClientConfig[] {
   const customId = settings.oauthClientId?.trim()
   const customSecret = settings.oauthClientSecret?.trim()
   if (customId && customSecret) {
-    return {
-      clientId: customId,
-      clientSecret: customSecret,
-      tokenUri: GOOGLE_TOKEN_URL,
-      scopes: DEFAULT_SCOPES,
-      source: 'settings',
-      rawTemplate: {
-        client_id: customId,
-        client_secret: customSecret,
-        token_uri: GOOGLE_TOKEN_URL,
-        scopes: DEFAULT_SCOPES
+    return [
+      {
+        clientId: customId,
+        clientSecret: customSecret,
+        tokenUri: GOOGLE_TOKEN_URL,
+        scopes: DEFAULT_SCOPES,
+        source: 'settings',
+        rawTemplate: {
+          client_id: customId,
+          client_secret: customSecret,
+          token_uri: GOOGLE_TOKEN_URL,
+          scopes: DEFAULT_SCOPES
+        }
       }
-    }
+    ]
+  }
+
+  const out: OAuthClientConfig[] = []
+  const seen = new Set<string>()
+  const push = (cfg: OAuthClientConfig) => {
+    const key = `${cfg.clientId}::${cfg.clientSecret}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(cfg)
+  }
+
+  if (cachedWorkingClient) {
+    push(cachedWorkingClient)
   }
 
   const fileCandidates: { path: string; source: 'orca-acp' | 'gemini-cli' }[] = [
@@ -91,68 +122,131 @@ export function resolveOAuthClient(
       const scopes = Array.isArray(obj.scopes)
         ? obj.scopes.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
         : []
-      return {
-        clientId,
-        clientSecret,
-        tokenUri: asString(obj.token_uri) ?? GOOGLE_TOKEN_URL,
-        scopes: mergeAgyScopes(scopes),
-        source: candidate.source,
-        rawTemplate: obj
+      const tokenUri = asString(obj.token_uri) ?? GOOGLE_TOKEN_URL
+      for (const sec of sanitizeGoogleSecret(clientSecret)) {
+        push({
+          clientId,
+          clientSecret: sec,
+          tokenUri,
+          scopes: mergeAgyScopes(scopes),
+          source: candidate.source,
+          rawTemplate: { ...obj, client_id: clientId, client_secret: sec, token_uri: tokenUri }
+        })
       }
     }
   }
 
-  if (agyBin) {
-    const extracted = extractOAuthClientFromBinary(agyBin)
-    if (extracted) return extracted
+  const binCandidates =
+    agyBin === null
+      ? []
+      : agyBin === undefined
+        ? findAgyCliCandidates()
+        : /\.(?:cmd|bat)$/i.test(agyBin)
+          ? findAgyCliCandidates()
+          : [agyBin]
+
+  for (const binPath of binCandidates) {
+    for (const cfg of extractOAuthClientCandidatesFromBinary(binPath)) {
+      push(cfg)
+    }
   }
 
-  return null
+  return out
 }
 
-function extractOAuthClientFromBinary(binPath: string): OAuthClientConfig | null {
+/** Return the primary OAuth client config (backward-compatible helper). */
+export function resolveOAuthClient(
+  paths: PlatformPaths,
+  settings: { oauthClientId?: string; oauthClientSecret?: string } = {},
+  agyBin: string | null | undefined = undefined
+): OAuthClientConfig | null {
+  return resolveOAuthClientCandidates(paths, settings, agyBin)[0] ?? null
+}
+
+function makeBinaryClientConfig(clientId: string, clientSecret: string): OAuthClientConfig {
+  return {
+    clientId,
+    clientSecret,
+    tokenUri: GOOGLE_TOKEN_URL,
+    scopes: DEFAULT_SCOPES,
+    source: 'agy-binary',
+    rawTemplate: {
+      client_id: clientId,
+      client_secret: clientSecret,
+      token_uri: GOOGLE_TOKEN_URL,
+      scopes: DEFAULT_SCOPES
+    }
+  }
+}
+
+function extractOAuthClientCandidatesFromBinary(binPath: string): OAuthClientConfig[] {
   try {
-    const buf = readFileSync(binPath)
-    const idMarker = Buffer.from('.apps.googleusercontent.com', 'utf8')
-    const idIdx = buf.indexOf(idMarker)
-    if (idIdx === -1) return null
-    const idStart = Math.max(0, idIdx - 96)
-    const idSlice = buf.slice(idStart, idIdx + idMarker.length).toString('latin1')
-    const idMatch = /(\d{6,}-[a-z0-9]{12,}\.apps\.googleusercontent\.com)/.exec(idSlice)
-    if (!idMatch) return null
-
-    const secretMarker = Buffer.from('GOCSPX-', 'utf8')
-    // Search nearby first, then whole binary
-    const windowStart = Math.max(0, idIdx - 4096)
-    const windowEnd = Math.min(buf.length, idIdx + 4096)
-    let secIdx = buf.slice(windowStart, windowEnd).indexOf(secretMarker)
-    let secSlice = ''
-    if (secIdx !== -1) {
-      secSlice = buf.slice(windowStart + secIdx, Math.min(buf.length, windowStart + secIdx + 64)).toString('latin1')
-    } else {
-      secIdx = buf.indexOf(secretMarker)
-      if (secIdx !== -1) {
-        secSlice = buf.slice(secIdx, Math.min(buf.length, secIdx + 64)).toString('latin1')
+    if (/\.(?:cmd|bat)$/i.test(binPath)) return []
+    const text = readFileSync(binPath).toString('latin1')
+    const idHits: { value: string; index: number }[] = []
+    const seenIds = new Set<string>()
+    const idRe = /\d{6,}-[a-z0-9]{12,}\.apps\.googleusercontent\.com/g
+    for (let m = idRe.exec(text); m !== null; m = idRe.exec(text)) {
+      if (!seenIds.has(m[0])) {
+        seenIds.add(m[0])
+        idHits.push({ value: m[0], index: m.index })
       }
     }
-    const secMatch = /(GOCSPX-[A-Za-z0-9_-]{20,40})/.exec(secSlice)
-    if (!secMatch) return null
+    if (idHits.length === 0) return []
 
-    return {
-      clientId: idMatch[1],
-      clientSecret: secMatch[1],
-      tokenUri: GOOGLE_TOKEN_URL,
-      scopes: DEFAULT_SCOPES,
-      source: 'agy-binary',
-      rawTemplate: {
-        client_id: idMatch[1],
-        client_secret: secMatch[1],
-        token_uri: GOOGLE_TOKEN_URL,
-        scopes: DEFAULT_SCOPES
+    // Standard Google GOCSPX client secrets are always 35 chars (7-char prefix + 28 chars).
+    // Capping at 28 prevents Go .rodata concatenated strings (like "cloudcode-pa") from leaking in.
+    const secHits: { value: string; index: number }[] = []
+    const seenSecs = new Set<string>()
+    const secRe = /GOCSPX-[A-Za-z0-9_-]{28}/g
+    for (let m = secRe.exec(text); m !== null; m = secRe.exec(text)) {
+      if (!seenSecs.has(m[0])) {
+        seenSecs.add(m[0])
+        secHits.push({ value: m[0], index: m.index })
       }
     }
+    if (secHits.length === 0) return []
+
+    const out: OAuthClientConfig[] = []
+    const seenPairs = new Set<string>()
+    const addPair = (id: string, sec: string) => {
+      const k = `${id}::${sec}`
+      if (seenPairs.has(k)) return
+      seenPairs.add(k)
+      out.push(makeBinaryClientConfig(id, sec))
+    }
+
+    // 1. Proximity pairs (text configs, scripts, JS bundles)
+    for (const idHit of idHits) {
+      for (const secHit of secHits) {
+        if (Math.abs(idHit.index - secHit.index) <= 8192) {
+          addPair(idHit.value, secHit.value)
+        }
+      }
+    }
+
+    // 2. Index-aligned Go .rodata table pairs (prefer known Antigravity prod clientId slot first if present)
+    const minLen = Math.min(idHits.length, secHits.length)
+    const alignedIndices = Array.from({ length: minLen }, (_, i) => i)
+    const prodIdx = alignedIndices.find((i) => idHits[i].value.startsWith('1071006060591-'))
+    if (prodIdx !== undefined && prodIdx > 0) {
+      addPair(idHits[prodIdx].value, secHits[prodIdx].value)
+    }
+    for (const i of alignedIndices) {
+      addPair(idHits[i].value, secHits[i].value)
+    }
+
+    // 3. Cross-product fallback bounded to avoid excessive retries
+    for (const idHit of idHits.slice(0, 4)) {
+      for (const secHit of secHits.slice(0, 4)) {
+        if (out.length >= 12) break
+        addPair(idHit.value, secHit.value)
+      }
+    }
+
+    return out
   } catch {
-    return null
+    return []
   }
 }
 
@@ -266,8 +360,9 @@ export async function refreshWithClient(
   })
   const data = (await resp.json()) as Record<string, unknown>
   if (!resp.ok) {
-    const desc = asString(data?.error_description) ?? asString(data?.error) ?? `HTTP ${resp.status}`
-    throw new Error(`Token refresh failed: ${desc}`)
+    const code = asString(data?.error)
+    const desc = asString(data?.error_description) ?? code ?? `HTTP ${resp.status}`
+    throw Object.assign(new Error(`Token refresh failed: ${desc}`), { oauthError: code })
   }
   const accessToken = asString(data.access_token)
   if (!accessToken) throw new Error('Token refresh returned no access_token')
@@ -277,6 +372,71 @@ export async function refreshWithClient(
     idToken: asString(data.id_token),
     expiresIn
   }
+}
+
+function isRetryableClientError(error: unknown): boolean {
+  const code = (error as { oauthError?: string | null })?.oauthError?.toLowerCase() ?? ''
+  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return (
+    code === 'invalid_client' ||
+    code === 'unauthorized_client' ||
+    code === 'deleted_client' ||
+    msg.includes('client secret is invalid') ||
+    msg.includes('oauth client was not found') ||
+    msg.includes('unauthorized_client')
+  )
+}
+
+/**
+ * Refresh using ordered OAuth client candidates, falling back cleanly if the first local client
+ * (e.g. a corrupted/mismatched acp_token.json or sandbox slot in agy.exe) rejects the secret.
+ */
+export async function refreshWithOAuthCandidates(
+  candidates: readonly OAuthClientConfig[],
+  refreshToken: string,
+  fetcher: HttpFetcher = fetch
+): Promise<{ accessToken: string; idToken: string | null; expiresIn: number; client: OAuthClientConfig }> {
+  let lastError: unknown = new Error('OAuth client config not found')
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i]
+    try {
+      const refreshed = await refreshWithClient(candidate, refreshToken, fetcher)
+      cachedWorkingClient = candidate
+      return { ...refreshed, client: candidate }
+    } catch (error) {
+      lastError = error
+      if (!isRetryableClientError(error) || i === candidates.length - 1) {
+        throw error
+      }
+    }
+  }
+  return lastError instanceof Error ? Promise.reject(lastError) : Promise.reject(new Error(String(lastError)))
+}
+
+export async function resolveImportedAgyIdentity(
+  login: { email: string | null; refreshToken: string; accessToken: string | null },
+  clients: readonly OAuthClientConfig[],
+  fetcher: HttpFetcher = fetch
+): Promise<{ email: string | null; name: string; warmedToken: { accessToken: string; expiresIn: number } | null }> {
+  if (login.email) return { email: login.email, name: '', warmedToken: null }
+  if (clients.length > 0) {
+    try {
+      const refreshed = await refreshWithOAuthCandidates(clients, login.refreshToken, fetcher)
+      const profile = await fetchProfile(refreshed.accessToken, fetcher)
+      return {
+        email: profile.email,
+        name: profile.name,
+        warmedToken: { accessToken: refreshed.accessToken, expiresIn: refreshed.expiresIn }
+      }
+    } catch {
+      return { email: null, name: '', warmedToken: null }
+    }
+  }
+  if (login.accessToken) {
+    const profile = await fetchProfile(login.accessToken, fetcher)
+    return { email: profile.email, name: profile.name, warmedToken: null }
+  }
+  return { email: null, name: '', warmedToken: null }
 }
 
 export type PendingOAuthFlow = {

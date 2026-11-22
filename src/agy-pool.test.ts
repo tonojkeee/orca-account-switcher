@@ -239,3 +239,62 @@ test('fetchAgyPoolState trips 429 circuit breaker immediately without polling re
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('switchAgyPoolAccount recovers from invalid_client secret mismatch and heals acp_token.json', async () => {
+  clearAgyTokenCache()
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-agy-heal-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+
+    const goodSecret = 'GOCSPX-' + 'g'.repeat(28)
+    const vaultAccounts = [
+      { email: 'win@gmail.com', name: 'Win', source: 'oauth' as const, addedAt: 1, refreshToken: 'rt-win' }
+    ]
+
+    const res = await switchAgyPoolAccount('win@gmail.com', {
+      paths,
+      platform: 'other' as NodeJS.Platform,
+      vaultAccounts,
+      oauthClients: [
+        {
+          clientId: 'bad-id',
+          clientSecret: 'bad-secret',
+          tokenUri: 'https://oauth.test/token',
+          scopes: ['openid'],
+          rawTemplate: { client_id: 'bad-id', client_secret: 'bad-secret', token_uri: 'https://oauth.test/token' }
+        },
+        {
+          clientId: 'good-id',
+          clientSecret: goodSecret,
+          tokenUri: 'https://oauth.test/token',
+          scopes: ['openid'],
+          rawTemplate: { client_id: 'good-id', client_secret: goodSecret, token_uri: 'https://oauth.test/token' }
+        }
+      ],
+      fetcher: async (_url, init) => {
+        const body = String(init.body)
+        if (body.includes('good-id')) {
+          return { ok: true, status: 200, json: async () => ({ access_token: 'at-healed', expires_in: 3600 }) }
+        }
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({ error: 'invalid_client', error_description: 'The provided client secret is invalid.' })
+        }
+      }
+    })
+
+    assert.equal(res.ok, true)
+    const healedAcp = JSON.parse(readFileSync(paths.orcaAcpTokenPath, 'utf8')) as {
+      client_id: string
+      client_secret: string
+    }
+    assert.equal(healedAcp.client_id, 'good-id')
+    assert.equal(healedAcp.client_secret, goodSecret)
+  } finally {
+    clearAgyTokenCache()
+    rmSync(home, { recursive: true, force: true })
+  }
+})

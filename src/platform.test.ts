@@ -4,6 +4,7 @@ import path from 'node:path'
 import { assert, test } from 'orca/testing'
 import {
   buildCommandInvocation,
+  findAgyCli,
   findAgyToolsCli,
   findOrcaCli,
   linkOrCopyFile,
@@ -50,6 +51,14 @@ test('findOrcaCli discovers PATH and platform fallback binaries', () => {
   assert.equal(
     findAgyToolsCli('win32', { PATH: 'C:\\Tools' }, 'C:\\Users\\Alex', (p) => p === path.win32.join('C:\\Tools', 'antigravity-tools.exe')),
     path.win32.join('C:\\Tools', 'antigravity-tools.exe')
+  )
+
+  // Prefer native agy.exe fallback over npm agy.cmd wrapper on Windows
+  const winAgyCmd = path.win32.join('C:\\Npm', 'agy.cmd')
+  const winAgyExe = path.win32.join('C:\\Users\\Alex', '.local', 'bin', 'agy.exe')
+  assert.equal(
+    findAgyCli('win32', { PATH: 'C:\\Npm' }, 'C:\\Users\\Alex', (p) => p === winAgyCmd || p === winAgyExe),
+    winAgyExe
   )
 })
 

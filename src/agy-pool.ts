@@ -3,7 +3,12 @@
 import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { readCurrentAgyLogin, writeAgyCliCredentials } from './keyring'
-import { DEFAULT_SCOPES, refreshWithClient, resolveOAuthClient, type OAuthClientConfig } from './oauth'
+import {
+  DEFAULT_SCOPES,
+  refreshWithOAuthCandidates,
+  resolveOAuthClientCandidates,
+  type OAuthClientConfig
+} from './oauth'
 import { asNumber, asString, asTimestampMs, round1 } from './parse'
 import {
   findAgyToolsCli,
@@ -153,7 +158,7 @@ function defaultJitterMs(): number {
 
 async function resolveAccessToken(
   account: MergedAgyAccount,
-  client: OAuthClientConfig | null,
+  clients: readonly OAuthClientConfig[],
   fetcher: QuotaFetcher,
   forceRefresh = false
 ): Promise<{ token: string } | { error: string }> {
@@ -171,9 +176,9 @@ async function resolveAccessToken(
     }
   }
 
-  if (client) {
+  if (clients.length > 0) {
     try {
-      const refreshed = await refreshWithClient(client, account.refreshToken, fetcher)
+      const refreshed = await refreshWithOAuthCandidates(clients, account.refreshToken, fetcher)
       accessTokenCache.set(key, {
         accessToken: refreshed.accessToken,
         expiresAtMs: Date.now() + refreshed.expiresIn * 1000
@@ -278,7 +283,7 @@ function emptyPoolAccount(
 async function fetchOneAccount(
   account: MergedAgyAccount,
   activeEmail: string | null,
-  client: OAuthClientConfig | null,
+  clients: readonly OAuthClientConfig[],
   fetcher: QuotaFetcher
 ): Promise<FetchOneResult> {
   const fail = (error: string, circuitBreakerReason: string | null = null): FetchOneResult => ({
@@ -287,7 +292,7 @@ async function fetchOneAccount(
   })
 
   try {
-    let auth = await resolveAccessToken(account, client, fetcher, false)
+    let auth = await resolveAccessToken(account, clients, fetcher, false)
     if ('error' in auth) return fail(auth.error)
 
     const callQuota = (token: string) =>
@@ -303,9 +308,9 @@ async function fetchOneAccount(
       })
 
     let resp = await callQuota(auth.token)
-    if (resp.status === 401 && client) {
+    if (resp.status === 401 && clients.length > 0) {
       accessTokenCache.delete(tokenCacheKey(account.email, account.refreshToken))
-      auth = await resolveAccessToken(account, client, fetcher, true)
+      auth = await resolveAccessToken(account, clients, fetcher, true)
       if ('error' in auth) return fail(auth.error)
       resp = await callQuota(auth.token)
     }
@@ -348,12 +353,23 @@ export function sortAgyPoolAccounts(accounts: readonly AgyPoolAccount[]): AgyPoo
   })
 }
 
+function resolvePoolClients(
+  paths: PlatformPaths,
+  options: { oauthClient?: OAuthClientConfig | null; oauthClients?: readonly OAuthClientConfig[] }
+): readonly OAuthClientConfig[] {
+  if (options.oauthClients) return options.oauthClients
+  if (options.oauthClient === null) return []
+  if (options.oauthClient !== undefined) return [options.oauthClient]
+  return resolveOAuthClientCandidates(paths)
+}
+
 export async function fetchAgyPoolState(
   options: {
     paths?: PlatformPaths
     platform?: PlatformKind
     vaultAccounts?: readonly VaultAccountSecret[]
     oauthClient?: OAuthClientConfig | null
+    oauthClients?: readonly OAuthClientConfig[]
     fetcher?: QuotaFetcher
     refreshQuotas?: boolean
     jitterMs?: () => number
@@ -362,20 +378,21 @@ export async function fetchAgyPoolState(
   const paths = options.paths ?? resolvePlatformPaths()
   const platform = options.platform ?? process.platform
   const fetcher = options.fetcher ?? defaultFetch
-  const client = options.oauthClient !== undefined ? options.oauthClient : resolveOAuthClient(paths)
+  const clients = resolvePoolClients(paths, options)
+  const oauthReady = clients.length > 0
   const stored = mergeAgySources(options.vaultAccounts ?? [], loadAgyToolsAccounts(paths.agyAccountsDir))
 
   const currentLogin = await readCurrentAgyLogin(paths, platform).catch(() => null)
   const activeEmail = currentLogin?.email ?? readActiveGeminiEmail(paths)
 
   if (stored.length === 0) {
-    return { available: false, oauthReady: client !== null, activeEmail, accounts: [], bestEmail: null, error: null }
+    return { available: false, oauthReady, activeEmail, accounts: [], bestEmail: null, error: null }
   }
 
   if (options.refreshQuotas === false) {
     return {
       available: true,
-      oauthReady: client !== null,
+      oauthReady,
       activeEmail,
       accounts: stored.map((a) => emptyPoolAccount(a, activeEmail, null)),
       bestEmail: null,
@@ -389,7 +406,7 @@ export async function fetchAgyPoolState(
   let haltedError: string | null = null
   for (let i = 0; i < stored.length; i++) {
     if (i > 0) await sleep(getJitter())
-    const outcome = await fetchOneAccount(stored[i], activeEmail, client, fetcher)
+    const outcome = await fetchOneAccount(stored[i], activeEmail, clients, fetcher)
     fetched.push(outcome.account)
     if (outcome.circuitBreakerReason) {
       haltedError = outcome.circuitBreakerReason
@@ -403,7 +420,7 @@ export async function fetchAgyPoolState(
   const best = sorted.find((a) => a.error === null && a.effectiveGemini !== null) ?? null
   return {
     available: true,
-    oauthReady: client !== null,
+    oauthReady,
     activeEmail,
     accounts: sorted,
     bestEmail: best?.email ?? null,
@@ -422,6 +439,7 @@ export async function switchAgyPoolAccount(
     platform?: PlatformKind
     vaultAccounts?: readonly VaultAccountSecret[]
     oauthClient?: OAuthClientConfig | null
+    oauthClients?: readonly OAuthClientConfig[]
     fetcher?: QuotaFetcher
   } = {}
 ): Promise<{ ok: boolean; message: string }> {
@@ -435,7 +453,8 @@ export async function switchAgyPoolAccount(
     return { ok: false, message: `Account ${targetEmail} not found in AGY Vault or ~/.antigravity_tools` }
   }
 
-  const client = options.oauthClient !== undefined ? options.oauthClient : resolveOAuthClient(paths)
+  const clients = resolvePoolClients(paths, options)
+  let workingClient: OAuthClientConfig | null = clients[0] ?? null
   const warnings: string[] = []
 
   // Obtain fresh access_token + id_token for `agy` CLI & Gemini CLI when OAuth client is available.
@@ -443,12 +462,13 @@ export async function switchAgyPoolAccount(
   let idToken: string | null = null
   let expiresIn = 3599
 
-  if (client) {
+  if (clients.length > 0) {
     try {
-      const refreshed = await refreshWithClient(client, match.refreshToken, fetcher)
+      const refreshed = await refreshWithOAuthCandidates(clients, match.refreshToken, fetcher)
       accessToken = refreshed.accessToken
       idToken = refreshed.idToken
       expiresIn = refreshed.expiresIn
+      workingClient = refreshed.client
       accessTokenCache.set(tokenCacheKey(match.email, match.refreshToken), {
         accessToken,
         expiresAtMs: Date.now() + expiresIn * 1000
@@ -476,8 +496,8 @@ export async function switchAgyPoolAccount(
       expiryIso: new Date(expiryMs).toISOString(),
       expiryMs,
       idToken,
-      scope: (client?.scopes ?? DEFAULT_SCOPES).join(' '),
-      oauthTemplate: client?.rawTemplate ?? null
+      scope: (workingClient?.scopes ?? DEFAULT_SCOPES).join(' '),
+      oauthTemplate: workingClient?.rawTemplate ?? null
     },
     paths,
     platform

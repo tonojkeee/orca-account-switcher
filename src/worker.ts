@@ -4,10 +4,9 @@ import { fetchAgyPoolState, switchAgyPoolAccount, warmAgyTokenCache, type QuotaF
 import { readCurrentAgyLogin, type AgyStoredToken } from './keyring'
 import {
   exchangeAuthorizationCode,
-  fetchProfile,
   parseCallbackInput,
-  refreshWithClient,
-  resolveOAuthClient,
+  resolveImportedAgyIdentity,
+  resolveOAuthClientCandidates,
   startLoopbackOAuthFlow,
   type HttpFetcher,
   type OAuthClientConfig,
@@ -92,13 +91,17 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     return info
   }
 
-  function getOAuthClient(): OAuthClientConfig | null {
-    if (deps.oauthClient !== undefined) return deps.oauthClient
-    return resolveOAuthClient(
+  function getOAuthCandidates(): OAuthClientConfig[] {
+    if (deps.oauthClient !== undefined) return deps.oauthClient ? [deps.oauthClient] : []
+    return resolveOAuthClientCandidates(
       paths,
       { oauthClientId: settings.oauthClientId, oauthClientSecret: settings.oauthClientSecret },
       resolveAgyBin()
     )
+  }
+
+  function getOAuthClient(): OAuthClientConfig | null {
+    return getOAuthCandidates()[0] ?? null
   }
 
   function collectDiagnostics(oauthClient: OAuthClientConfig | null = getOAuthClient()) {
@@ -140,7 +143,8 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     }
     refreshInFlight = (async () => {
       const cliPath = resolveCli()
-      const oauthClient = getOAuthClient()
+      const oauthClients = getOAuthCandidates()
+      const oauthClient = oauthClients[0] ?? null
       const vaultAccounts = settings.showAgyPool ? await listVaultAccounts(orca) : []
       const [orcaRes, agyPool, update] = await Promise.all([
         fetchOrcaAccounts(cliPath, runner),
@@ -149,7 +153,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
               paths,
               platform,
               vaultAccounts,
-              oauthClient,
+              oauthClients: oauthClients,
               fetcher: deps.fetcher,
               refreshQuotas
             })
@@ -229,7 +233,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       paths,
       platform,
       vaultAccounts,
-      oauthClient: getOAuthClient(),
+      oauthClients: getOAuthCandidates(),
       fetcher: deps.fetcher
     })
     let note = res.message
@@ -287,25 +291,11 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       }
     }
 
-    let email = currentLogin.email
-    let name = ''
-    let warmedToken: { accessToken: string; expiresIn: number } | null = null
-    const client = getOAuthClient()
-    if (!email && client) {
-      try {
-        const refreshed = await refreshWithClient(client, currentLogin.refreshToken, deps.fetcher)
-        warmedToken = { accessToken: refreshed.accessToken, expiresIn: refreshed.expiresIn }
-        const profile = await fetchProfile(refreshed.accessToken, deps.fetcher)
-        email = profile.email
-        name = profile.name
-      } catch {
-        // Handled below if email remains null
-      }
-    } else if (!email && currentLogin.accessToken) {
-      const profile = await fetchProfile(currentLogin.accessToken, deps.fetcher)
-      email = profile.email
-      name = profile.name
-    }
+    const { email, name, warmedToken } = await resolveImportedAgyIdentity(
+      currentLogin,
+      getOAuthCandidates(),
+      deps.fetcher
+    )
 
     if (!email) {
       const snapshot = latestSnapshot ?? (await loadSnapshot(false))

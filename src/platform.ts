@@ -161,17 +161,25 @@ export function findAgyToolsCli(
   return fallbacks.find((candidate) => fileExists(candidate)) ?? null
 }
 
-/** Locate the `agy` CLI binary across macOS, Windows, and Linux. */
-export function findAgyCli(
+/** Locate candidate `agy` CLI binaries across macOS, Windows, and Linux (preferring native .exe over .cmd on Windows). */
+export function findAgyCliCandidates(
   platform: PlatformKind = process.platform,
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
   fileExists: (p: string) => boolean = existsSync
-): string | null {
+): string[] {
   const p = pathFor(platform)
-  const pathNames = platform === 'win32' ? ['agy.exe', 'agy.cmd', 'agy'] : ['agy']
-  const fromPath = findOnPath(pathNames, env, platform, fileExists)
-  if (fromPath) return fromPath
+  const found: string[] = []
+  const seen = new Set<string>()
+  const pushIfExists = (candidate: string | null) => {
+    if (!candidate) return
+    const key = platform === 'win32' ? candidate.toLowerCase() : candidate
+    if (seen.has(key)) return
+    if (fileExists(candidate)) {
+      seen.add(key)
+      found.push(candidate)
+    }
+  }
 
   const fallbacks =
     platform === 'darwin'
@@ -185,7 +193,31 @@ export function findAgyCli(
           ]
         : [p.join(home, '.local', 'bin', 'agy'), '/usr/local/bin/agy', '/usr/bin/agy']
 
-  return fallbacks.find((candidate) => fileExists(candidate)) ?? null
+  if (platform === 'win32') {
+    for (const dir of splitPathEnv(env, platform)) {
+      pushIfExists(p.join(dir, 'agy.exe'))
+    }
+    for (const fb of fallbacks) pushIfExists(fb)
+    for (const dir of splitPathEnv(env, platform)) {
+      pushIfExists(p.join(dir, 'agy.cmd'))
+      pushIfExists(p.join(dir, 'agy'))
+    }
+  } else {
+    pushIfExists(findOnPath(['agy'], env, platform, fileExists))
+    for (const fb of fallbacks) pushIfExists(fb)
+  }
+
+  return found
+}
+
+/** Locate the `agy` CLI binary across macOS, Windows, and Linux. */
+export function findAgyCli(
+  platform: PlatformKind = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+  fileExists: (p: string) => boolean = existsSync
+): string | null {
+  return findAgyCliCandidates(platform, env, home, fileExists)[0] ?? null
 }
 
 export type ExecResult = {
