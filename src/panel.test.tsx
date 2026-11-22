@@ -67,13 +67,43 @@ function makeSnapshot(activeOrcaId: string): AccountsSnapshot {
           claudeWeekly: 100,
           effectiveGemini: 20,
           error: null
+        },
+        {
+          email: 'three@gmail.com',
+          name: 'Three',
+          source: 'vault',
+          active: false,
+          gemini5h: 60,
+          geminiWeekly: 60,
+          claude5h: 100,
+          claudeWeekly: 100,
+          effectiveGemini: 60,
+          error: null
+        },
+        {
+          email: 'four@gmail.com',
+          name: 'Four',
+          source: 'vault',
+          active: false,
+          gemini5h: 70,
+          geminiWeekly: 70,
+          claude5h: 100,
+          claudeWeekly: 100,
+          effectiveGemini: 70,
+          error: null
         }
       ]
+    },
+    diagnostics: {
+      orcaCliPath: '/usr/local/bin/orca',
+      agyCliPath: '/usr/local/bin/agy',
+      agyToolsCliPath: null,
+      oauthClientSource: 'orca-acp'
     }
   }
 }
 
-test('panel renders Orca accounts + AGY Vault, switches on press, and supports OAuth / Import actions', async () => {
+test('panel renders Orca accounts + AGY Vault, diagnostics, filter, and actions cleanly', async () => {
   let active = 'ag-1'
   const host = mockHost({
     requests: {
@@ -97,12 +127,27 @@ test('panel renders Orca accounts + AGY Vault, switches on press, and supports O
   const view = await mount(panel, { host })
   assert.ok(view.find({ text: /one@gmail\.com/ }))
   assert.ok(view.find({ text: /two@gmail\.com/ }))
+  assert.ok(view.find({ type: 'Collapsible' }))
+
+  // Expand Runtime diagnostics Collapsible and verify detected paths render
+  await view.toggle({ type: 'Collapsible' })
+  assert.ok(view.find({ text: /\/usr\/local\/bin\/orca/ }))
 
   await view.press({ text: 'Best' })
   assert.ok(view.find({ text: /Switched agy CLI \+ Orca ACP to two@gmail\.com/ }))
 
+  // Switch to AGY Vault tab and test live search filter across >3 accounts
+  await view.select({ type: 'Tabs' }, 'agy')
+  const filterInput = view.find({ label: 'Filter AGY accounts' })
+  assert.ok(filterInput)
+  assert.ok(view.find({ text: 'three@gmail.com' }))
+  await view.type({ label: 'Filter AGY accounts' }, 'three')
+  assert.ok(view.find({ text: 'three@gmail.com' }))
+  assert.equal(view.find({ text: 'four@gmail.com' }), null)
+
   await view.post('accounts.updated', makeSnapshot('ag-1'))
   assert.deepEqual(view.errors, [])
+  assert.deepEqual(view.warnings, [])
   assert.deepEqual(view.refusals, [])
   await view.unmount()
 })

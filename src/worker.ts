@@ -1,6 +1,6 @@
 // Orca plugin worker: polls account states, updates status bar, manages built-in OAuth vault & live switches.
 import type { OrcaWorkerApi } from 'orca/worker'
-import { fetchAgyPoolState, switchAgyPoolAccount, type QuotaFetcher } from './agy-pool'
+import { fetchAgyPoolState, switchAgyPoolAccount, warmAgyTokenCache, type QuotaFetcher } from './agy-pool'
 import { readCurrentAgyLogin, type AgyStoredToken } from './keyring'
 import {
   exchangeAuthorizationCode,
@@ -13,7 +13,14 @@ import {
   type PendingOAuthFlow
 } from './oauth'
 import { fetchOrcaAccounts, selectOrcaAccount, type CommandRunner } from './orca-cli'
-import { findAgyCli, findOrcaCli, resolvePlatformPaths, runCommand, type PlatformPaths } from './platform'
+import {
+  findAgyCli,
+  findAgyToolsCli,
+  findOrcaCli,
+  resolvePlatformPaths,
+  runCommand,
+  type PlatformPaths
+} from './platform'
 import type { AccountsSnapshot, OrcaAgentKind, SwitchResult } from './protocol'
 import { buildStatusBarState } from './status'
 import { listVaultAccounts, removeVaultAccount, saveVaultAccount } from './vault'
@@ -130,6 +137,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     }
     refreshInFlight = (async () => {
       const cliPath = resolveCli()
+      const oauthClient = getOAuthClient()
       const vaultAccounts = settings.showAgyPool ? await listVaultAccounts(orca) : []
       const [orcaRes, agyPool] = await Promise.all([
         fetchOrcaAccounts(cliPath, runner),
@@ -138,7 +146,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
               paths,
               platform,
               vaultAccounts,
-              oauthClient: getOAuthClient(),
+              oauthClient,
               fetcher: deps.fetcher,
               refreshQuotas
             })
@@ -158,6 +166,12 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
         orcaError: orcaRes.error,
         providers: orcaRes.providers,
         agyPool,
+        diagnostics: {
+          orcaCliPath: cliPath,
+          agyCliPath: resolveAgyBin(),
+          agyToolsCliPath: findAgyToolsCli(platform),
+          oauthClientSource: oauthClient?.source ?? (oauthClient ? 'resolved' : null)
+        },
         fetchedAt: Date.now()
       }
       latestSnapshot = snapshot
@@ -214,8 +228,11 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     })
     let note = res.message
     if (res.ok) {
-      const current = preloaded ?? latestSnapshot
-      const antigravity = current?.providers.find((p) => p.agent === 'antigravity')
+      const providers =
+        preloaded?.providers ??
+        latestSnapshot?.providers ??
+        (await fetchOrcaAccounts(resolveCli(), runner)).providers
+      const antigravity = providers.find((p) => p.agent === 'antigravity')
       const linked = antigravity?.accounts.find((a) => a.email?.toLowerCase() === email.toLowerCase())
       if (linked) {
         const orcaSync = await selectOrcaAccount('antigravity', linked.id, resolveCli(), runner)
@@ -261,7 +278,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       ? await deps.readCurrentLogin()
       : await readCurrentAgyLogin(paths, platform)
     if (!currentLogin) {
-      const snapshot = await loadSnapshot(true)
+      const snapshot = latestSnapshot ?? (await loadSnapshot(false))
       return {
         ok: false,
         message: 'No active agy / Gemini login found on this machine. Use "+ Add Google Account" to sign in.',
@@ -271,10 +288,12 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
 
     let email = currentLogin.email
     let name = ''
+    let warmedToken: { accessToken: string; expiresIn: number } | null = null
     const client = getOAuthClient()
     if (!email && client) {
       try {
         const refreshed = await refreshWithClient(client, currentLogin.refreshToken, deps.fetcher)
+        warmedToken = { accessToken: refreshed.accessToken, expiresIn: refreshed.expiresIn }
         const profile = await fetchProfile(refreshed.accessToken, deps.fetcher)
         email = profile.email
         name = profile.name
@@ -288,12 +307,16 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     }
 
     if (!email) {
-      const snapshot = await loadSnapshot(true)
+      const snapshot = latestSnapshot ?? (await loadSnapshot(false))
       return {
         ok: false,
         message: 'Found an agy token, but could not determine its email. Use "+ Add Google Account" instead.',
         snapshot
       }
+    }
+
+    if (warmedToken) {
+      warmAgyTokenCache(email, currentLogin.refreshToken, warmedToken.accessToken, warmedToken.expiresIn)
     }
 
     const { storedInKeyring } = await saveVaultAccount(orca, {
@@ -325,6 +348,18 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       settings = DEFAULT_SETTINGS
     }
     resetPollTimer()
+
+    const cached = await orca.storage.get<AccountsSnapshot>('lastSnapshot').catch(() => undefined)
+    if (cached && typeof cached.fetchedAt === 'number' && Array.isArray(cached.providers)) {
+      latestSnapshot = cached
+      await updateStatusBar(cached)
+      orca.panels.post('accounts.updated', cached)
+      if (Date.now() - cached.fetchedAt < DEFAULT_QUOTA_TTL_MS) {
+        await maybeAutoSwitch(cached)
+        return
+      }
+    }
+
     const snap = await loadSnapshot(true)
     await maybeAutoSwitch(snap)
   }
@@ -356,26 +391,30 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       )
     }
     activeOAuthFlow?.close()
-    activeOAuthFlow = await startLoopbackOAuthFlow(client, async (outcome) => {
-      activeOAuthFlow = null
-      if (!outcome.ok) {
-        const snapshot = latestSnapshot ?? (await loadSnapshot(false))
-        orca.panels.post('oauth.completed', { ok: false, message: outcome.error, snapshot })
-        return
-      }
-      await saveVaultAccount(orca, {
-        email: outcome.account.email,
-        name: outcome.account.name,
-        refreshToken: outcome.account.refreshToken,
-        source: 'oauth'
-      })
-      const switched = await performAgySwitch(outcome.account.email)
-      orca.panels.post('oauth.completed', {
-        ok: switched.ok,
-        message: `Connected & activated ${outcome.account.email}`,
-        snapshot: switched.snapshot
-      })
-    })
+    activeOAuthFlow = await startLoopbackOAuthFlow(
+      client,
+      async (outcome) => {
+        activeOAuthFlow = null
+        if (!outcome.ok) {
+          const snapshot = latestSnapshot ?? (await loadSnapshot(false))
+          orca.panels.post('oauth.completed', { ok: false, message: outcome.error, snapshot })
+          return
+        }
+        await saveVaultAccount(orca, {
+          email: outcome.account.email,
+          name: outcome.account.name,
+          refreshToken: outcome.account.refreshToken,
+          source: 'oauth'
+        })
+        const switched = await performAgySwitch(outcome.account.email)
+        orca.panels.post('oauth.completed', {
+          ok: switched.ok,
+          message: `Connected & activated ${outcome.account.email}`,
+          snapshot: switched.snapshot
+        })
+      },
+      deps.fetcher
+    )
     return { authUrl: activeOAuthFlow.authUrl, redirectUri: activeOAuthFlow.redirectUri }
   })
 

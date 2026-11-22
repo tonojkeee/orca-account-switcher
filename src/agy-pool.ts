@@ -3,7 +3,8 @@
 import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { readCurrentAgyLogin, writeAgyCliCredentials } from './keyring'
-import { refreshWithClient, resolveOAuthClient, type OAuthClientConfig } from './oauth'
+import { DEFAULT_SCOPES, refreshWithClient, resolveOAuthClient, type OAuthClientConfig } from './oauth'
+import { asNumber, asString, asTimestampMs, round1 } from './parse'
 import {
   findAgyToolsCli,
   readJsonObject,
@@ -30,18 +31,6 @@ type MergedAgyAccount = {
   refreshToken: string
   accessToken: string | null
   expiryMs: number
-}
-
-function asString(v: unknown): string | null {
-  return typeof v === 'string' && v.trim() ? v.trim() : null
-}
-
-function asNumber(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-
-function round1(value: number): number {
-  return Math.round(value * 10) / 10
 }
 
 export function readActiveGeminiEmail(paths: PlatformPaths): string | null {
@@ -136,6 +125,19 @@ export function clearAgyTokenCache(): void {
   accessTokenCache.clear()
 }
 
+export function warmAgyTokenCache(
+  email: string,
+  refreshToken: string,
+  accessToken: string,
+  expiresInSeconds: number
+): void {
+  if (!email.trim() || !refreshToken.trim() || !accessToken.trim()) return
+  accessTokenCache.set(tokenCacheKey(email, refreshToken), {
+    accessToken,
+    expiresAtMs: Date.now() + Math.max(60, expiresInSeconds) * 1000
+  })
+}
+
 function tokenCacheKey(email: string, refreshToken: string): string {
   return `${email.toLowerCase()}::${refreshToken.slice(-12)}`
 }
@@ -195,11 +197,15 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
   claude5h: number
   claudeWeekly: number
   effectiveGemini: number
+  gemini5hResetsAt: number | null
+  geminiWeeklyResetsAt: number | null
 } {
   let gemini5h = 100
   let geminiWeekly = 100
   let claude5h = 100
   let claudeWeekly = 100
+  let gemini5hResetsAt: number | null = null
+  let geminiWeeklyResetsAt: number | null = null
 
   const root = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   const groups = Array.isArray(root.groups) ? root.groups : []
@@ -216,9 +222,15 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
       if (frac === null) continue
       const pct = Math.max(0, Math.min(100, frac * 100))
       const win = asString(bucket.window)
+      const resetsAt = asTimestampMs(bucket.resetTime ?? bucket.resetsAt)
       if (displayName.includes('Gemini')) {
-        if (win === '5h') gemini5h = pct
-        else if (win === 'weekly') geminiWeekly = pct
+        if (win === '5h') {
+          gemini5h = pct
+          gemini5hResetsAt = resetsAt
+        } else if (win === 'weekly') {
+          geminiWeekly = pct
+          geminiWeeklyResetsAt = resetsAt
+        }
       } else if (displayName.includes('Claude') || displayName.includes('GPT')) {
         if (win === '5h') claude5h = pct
         else if (win === 'weekly') claudeWeekly = pct
@@ -231,7 +243,35 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
     geminiWeekly: round1(geminiWeekly),
     claude5h: round1(claude5h),
     claudeWeekly: round1(claudeWeekly),
-    effectiveGemini: round1(Math.min(gemini5h, geminiWeekly))
+    effectiveGemini: round1(Math.min(gemini5h, geminiWeekly)),
+    gemini5hResetsAt,
+    geminiWeeklyResetsAt
+  }
+}
+
+type FetchOneResult = {
+  account: AgyPoolAccount
+  circuitBreakerReason: string | null
+}
+
+function emptyPoolAccount(
+  account: MergedAgyAccount,
+  activeEmail: string | null,
+  error: string | null
+): AgyPoolAccount {
+  return {
+    email: account.email,
+    name: account.name,
+    source: account.source,
+    active: activeEmail !== null && account.email.toLowerCase() === activeEmail.toLowerCase(),
+    gemini5h: null,
+    geminiWeekly: null,
+    claude5h: null,
+    claudeWeekly: null,
+    effectiveGemini: null,
+    gemini5hResetsAt: null,
+    geminiWeeklyResetsAt: null,
+    error
   }
 }
 
@@ -240,19 +280,10 @@ async function fetchOneAccount(
   activeEmail: string | null,
   client: OAuthClientConfig | null,
   fetcher: QuotaFetcher
-): Promise<AgyPoolAccount> {
-  const active = activeEmail !== null && account.email.toLowerCase() === activeEmail.toLowerCase()
-  const fail = (error: string): AgyPoolAccount => ({
-    email: account.email,
-    name: account.name,
-    source: account.source,
-    active,
-    gemini5h: null,
-    geminiWeekly: null,
-    claude5h: null,
-    claudeWeekly: null,
-    effectiveGemini: null,
-    error
+): Promise<FetchOneResult> {
+  const fail = (error: string, circuitBreakerReason: string | null = null): FetchOneResult => ({
+    account: emptyPoolAccount(account, activeEmail, error),
+    circuitBreakerReason
   })
 
   try {
@@ -279,16 +310,25 @@ async function fetchOneAccount(
       resp = await callQuota(auth.token)
     }
 
+    if (resp.status === 429 || resp.status === 403) {
+      return fail(
+        `Quota HTTP ${resp.status}`,
+        `Quota HTTP ${resp.status} on ${account.email} — polling paused to protect pool accounts from IP rate limits`
+      )
+    }
     if (!resp.ok) return fail(`Quota HTTP ${resp.status}`)
 
     const quotas = parseCloudCodeQuotaResponse(await resp.json())
     return {
-      email: account.email,
-      name: account.name,
-      source: account.source,
-      active,
-      ...quotas,
-      error: null
+      account: {
+        email: account.email,
+        name: account.name,
+        source: account.source,
+        active: activeEmail !== null && account.email.toLowerCase() === activeEmail.toLowerCase(),
+        ...quotas,
+        error: null
+      },
+      circuitBreakerReason: null
     }
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error))
@@ -337,29 +377,27 @@ export async function fetchAgyPoolState(
       available: true,
       oauthReady: client !== null,
       activeEmail,
-      accounts: stored.map((a) => ({
-        email: a.email,
-        name: a.name,
-        source: a.source,
-        active: activeEmail !== null && a.email.toLowerCase() === activeEmail.toLowerCase(),
-        gemini5h: null,
-        geminiWeekly: null,
-        claude5h: null,
-        claudeWeekly: null,
-        effectiveGemini: null,
-        error: null
-      })),
+      accounts: stored.map((a) => emptyPoolAccount(a, activeEmail, null)),
       bestEmail: null,
       error: null
     }
   }
 
-  // Sequential polling with human-like jitter avoids burst traffic from a single IP.
+  // Sequential polling with human-like jitter and immediate circuit-breaking on 429/403 avoids IP bursts.
   const getJitter = options.jitterMs ?? defaultJitterMs
   const fetched: AgyPoolAccount[] = []
+  let haltedError: string | null = null
   for (let i = 0; i < stored.length; i++) {
     if (i > 0) await sleep(getJitter())
-    fetched.push(await fetchOneAccount(stored[i], activeEmail, client, fetcher))
+    const outcome = await fetchOneAccount(stored[i], activeEmail, client, fetcher)
+    fetched.push(outcome.account)
+    if (outcome.circuitBreakerReason) {
+      haltedError = outcome.circuitBreakerReason
+      for (let j = i + 1; j < stored.length; j++) {
+        fetched.push(emptyPoolAccount(stored[j], activeEmail, 'Skipped (rate limit protection)'))
+      }
+      break
+    }
   }
   const sorted = sortAgyPoolAccounts(fetched)
   const best = sorted.find((a) => a.error === null && a.effectiveGemini !== null) ?? null
@@ -369,7 +407,7 @@ export async function fetchAgyPoolState(
     activeEmail,
     accounts: sorted,
     bestEmail: best?.email ?? null,
-    error: null
+    error: haltedError
   }
 }
 
@@ -438,7 +476,7 @@ export async function switchAgyPoolAccount(
       expiryIso: new Date(expiryMs).toISOString(),
       expiryMs,
       idToken,
-      scope: (client?.scopes ?? ['https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/userinfo.email', 'openid']).join(' '),
+      scope: (client?.scopes ?? DEFAULT_SCOPES).join(' '),
       oauthTemplate: client?.rawTemplate ?? null
     },
     paths,

@@ -1,4 +1,5 @@
 // Boundary parser and runner for Orca's native `orca account list` and `orca account select` CLI.
+import { asNumber, asRecord, asString } from './parse'
 import { findOrcaCli, runCommand, type ExecResult } from './platform'
 import type { OrcaAgentKind, OrcaManagedAccount, OrcaProviderState, QuotaBucket } from './protocol'
 
@@ -11,18 +12,6 @@ const PROVIDER_META: readonly { agent: OrcaAgentKind; title: string; supportsSys
 ]
 
 export type CommandRunner = (executable: string, args: readonly string[], timeoutMs?: number) => Promise<ExecResult>
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value.trim() : null
-}
-
-function asNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)))

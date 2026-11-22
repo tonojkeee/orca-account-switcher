@@ -1,18 +1,13 @@
 // Declarative Orca sidebar panel: switches Orca managed agents, `agy` CLI, and built-in OAuth Vault on the fly.
 import {
   atom,
-  Badge,
-  Box,
   Button,
   Callout,
-  Card,
-  Code,
   EmptyState,
   Heading,
   IconButton,
   Input,
   plugin,
-  Progress,
   read,
   RelativeTime,
   Row,
@@ -26,15 +21,14 @@ import {
   type PanelContext,
   type Tone
 } from 'orca'
-import type {
-  AccountsSnapshot,
-  AgyPoolAccount,
-  OAuthStartResult,
-  OrcaAgentKind,
-  OrcaManagedAccount,
-  OrcaProviderState,
-  SwitchResult
-} from './protocol'
+import {
+  AgyEmptyState,
+  AgyPoolRow,
+  DiagnosticsSection,
+  OAuthConnectCard,
+  ProviderSection
+} from './panel-components'
+import type { AccountsSnapshot, OAuthStartResult, SwitchResult } from './protocol'
 
 const snapshotAtom = atom<AccountsSnapshot | null>(null)
 const busyKeyAtom = atom<string | null>(null)
@@ -42,19 +36,7 @@ const feedbackAtom = atom<{ tone: Tone; text: string } | null>(null)
 const activeTabAtom = atom('activeTab', 'orca', { persist: 'plugin' })
 const oauthPendingAtom = atom<OAuthStartResult | null>(null)
 const manualCallbackAtom = atom('')
-
-function toneForQuota(pct: number | null): Tone {
-  if (pct === null) return 'neutral'
-  if (pct >= 50) return 'success'
-  if (pct >= 15) return 'warning'
-  return 'danger'
-}
-
-function sourceBadgeLabel(source: AgyPoolAccount['source']): string {
-  if (source === 'both') return 'Vault + Tools'
-  if (source === 'vault') return 'Vault'
-  return 'AGY Tools'
-}
+const agyFilterAtom = atom('')
 
 async function refreshAccounts(): Promise<void> {
   if (read(busyKeyAtom) !== null) return
@@ -163,189 +145,6 @@ export function setup(ctx: PanelContext): void {
     })
 }
 
-function QuotaBar({ label, value }: { label: string; value: number }) {
-  return (
-    <Stack gap="xs">
-      <Row justify="between" align="center">
-        <Text size="xs" muted>
-          {label}
-        </Text>
-        <Badge tone={toneForQuota(value)}>{value}%</Badge>
-      </Row>
-      <Progress label={label} labelHidden value={value} />
-    </Stack>
-  )
-}
-
-function OrcaAccountRow({
-  agent,
-  account,
-  busyKey
-}: {
-  agent: OrcaAgentKind
-  account: OrcaManagedAccount
-  busyKey: string | null
-}) {
-  const key = `orca:${agent}:${account.id}`
-  return (
-    <Box padding="sm" border={account.active ? 'accent' : true} radius="md" background={account.active ? 'card' : 'none'}>
-      <Stack gap="sm">
-        <Row justify="between" align="center" gap="xs">
-          <Stack gap="none">
-            <Row gap="xs" align="center" wrap>
-              <Text size="sm" weight="semibold" truncate>
-                {account.label}
-              </Text>
-              {account.active ? <Badge tone="success">Active</Badge> : null}
-              {account.needsSignIn ? <Badge tone="warning">Re-auth</Badge> : null}
-            </Row>
-            {account.email && account.email !== account.label ? (
-              <Text size="xs" muted truncate>
-                {account.email}
-              </Text>
-            ) : null}
-          </Stack>
-          <Button
-            size="xs"
-            variant={account.active ? 'ghost' : 'solid'}
-            tone={account.active ? 'neutral' : 'accent'}
-            disabled={account.active || busyKey !== null}
-            onPress={() => runAction(key, () => plugin.request('accounts.selectOrca', { agent, account: account.id }))}
-          >
-            {busyKey === key ? 'Switching…' : account.active ? 'Current' : 'Use'}
-          </Button>
-        </Row>
-        {account.buckets.length > 0 ? (
-          <Stack gap="xs">
-            {account.buckets.slice(0, 8).map((bucket) => (
-              <QuotaBar key={bucket.label} label={bucket.label} value={bucket.remainingPercent} />
-            ))}
-          </Stack>
-        ) : null}
-      </Stack>
-    </Box>
-  )
-}
-
-function ProviderSection({ provider, busyKey }: { provider: OrcaProviderState; busyKey: string | null }) {
-  const activeCount = provider.accounts.length
-  const usingSystem = provider.supportsSystemDefault && provider.activeAccountId === null
-  const sysKey = `orca:${provider.agent}:system`
-
-  return (
-    <Card
-      title={provider.title}
-      description={
-        activeCount === 0
-          ? provider.supportsSystemDefault
-            ? `No managed accounts (${provider.systemDefaultLabel ?? 'system default'})`
-            : 'No managed accounts saved in Orca'
-          : `${activeCount} saved account${activeCount === 1 ? '' : 's'}`
-      }
-    >
-      <Stack gap="sm">
-        {provider.supportsSystemDefault ? (
-          <Row justify="between" align="center" gap="xs">
-            <Row gap="xs" align="center">
-              <Text size="xs" muted>
-                System default{provider.systemDefaultLabel ? ` · ${provider.systemDefaultLabel}` : ''}
-              </Text>
-              {usingSystem ? <Badge tone="success">Active</Badge> : null}
-            </Row>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={usingSystem || busyKey !== null}
-              onPress={() =>
-                runAction(sysKey, () => plugin.request('accounts.selectOrca', { agent: provider.agent, account: 'system' }))
-              }
-            >
-              {busyKey === sysKey ? 'Switching…' : 'Use system'}
-            </Button>
-          </Row>
-        ) : null}
-        {provider.accounts.map((acc) => (
-          <OrcaAccountRow key={acc.id} agent={provider.agent} account={acc} busyKey={busyKey} />
-        ))}
-      </Stack>
-    </Card>
-  )
-}
-
-function AgyPoolRow({
-  account,
-  isBest,
-  busyKey
-}: {
-  account: AgyPoolAccount
-  isBest: boolean
-  busyKey: string | null
-}) {
-  const key = `agy:${account.email}`
-  const delKey = `agy-rm:${account.email}`
-  const removable = account.source === 'vault' || account.source === 'both'
-  return (
-    <Box padding="sm" border={account.active ? 'accent' : true} radius="md" background={account.active ? 'card' : 'none'}>
-      <Stack gap="sm">
-        <Row justify="between" align="center" gap="xs">
-          <Stack gap="none">
-            <Row gap="xs" align="center" wrap>
-              <Text size="sm" weight="semibold" truncate>
-                {account.email}
-              </Text>
-              {account.active ? <Badge tone="success">Active</Badge> : null}
-              {isBest ? <Badge tone="accent">Best</Badge> : null}
-              <Badge tone="neutral">{sourceBadgeLabel(account.source)}</Badge>
-            </Row>
-            {account.name ? (
-              <Text size="xs" muted truncate>
-                {account.name}
-              </Text>
-            ) : null}
-          </Stack>
-          <Row gap="xs" align="center">
-            {removable ? (
-              <IconButton
-                icon="delete"
-                label={`Remove ${account.email} from vault`}
-                variant="ghost"
-                tone="danger"
-                size="xs"
-                disabled={busyKey !== null}
-                onPress={() => runAction(delKey, () => plugin.request('accounts.removeVaultAccount', { email: account.email }))}
-              />
-            ) : null}
-            <Button
-              size="xs"
-              variant={account.active ? 'ghost' : 'solid'}
-              tone={account.active ? 'neutral' : 'accent'}
-              disabled={account.active || busyKey !== null}
-              onPress={() => runAction(key, () => plugin.request('accounts.selectAgyPool', { email: account.email }))}
-            >
-              {busyKey === key ? 'Switching…' : account.active ? 'Current' : 'Switch'}
-            </Button>
-          </Row>
-        </Row>
-        {account.error ? (
-          <Text size="xs" tone="danger">
-            {account.error}
-          </Text>
-        ) : (
-          <Stack gap="xs">
-            {account.gemini5h !== null ? <QuotaBar label="Gemini 5h" value={Math.round(account.gemini5h)} /> : null}
-            {account.geminiWeekly !== null ? (
-              <QuotaBar label="Gemini Weekly" value={Math.round(account.geminiWeekly)} />
-            ) : null}
-            {account.claudeWeekly !== null ? (
-              <QuotaBar label="Claude / GPT Weekly" value={Math.round(account.claudeWeekly)} />
-            ) : null}
-          </Stack>
-        )}
-      </Stack>
-    </Box>
-  )
-}
-
 export default function Panel() {
   const snap = read(snapshotAtom)
   const busyKey = read(busyKeyAtom)
@@ -353,6 +152,7 @@ export default function Panel() {
   const tab = read(activeTabAtom)
   const oauth = read(oauthPendingAtom)
   const manualCallback = read(manualCallbackAtom)
+  const agyFilter = read(agyFilterAtom)
 
   if (!snap) {
     return (
@@ -367,6 +167,12 @@ export default function Panel() {
 
   const configuredProviders = snap.providers.filter((p) => p.accounts.length > 0 || p.systemDefaultLabel !== null)
   const emptyProviders = snap.providers.filter((p) => p.accounts.length === 0 && p.systemDefaultLabel === null)
+  const filterQuery = agyFilter.trim().toLowerCase()
+  const filteredAgyAccounts = filterQuery
+    ? snap.agyPool.accounts.filter(
+        (acc) => acc.email.toLowerCase().includes(filterQuery) || acc.name.toLowerCase().includes(filterQuery)
+      )
+    : snap.agyPool.accounts
 
   return (
     <Stack gap="md">
@@ -428,7 +234,14 @@ export default function Panel() {
               />
             ) : (
               configuredProviders.map((provider) => (
-                <ProviderSection key={provider.agent} provider={provider} busyKey={busyKey} />
+                <ProviderSection
+                  key={provider.agent}
+                  provider={provider}
+                  busyKey={busyKey}
+                  onSelect={(key, agent, account) =>
+                    runAction(key, () => plugin.request('accounts.selectOrca', { agent, account }))
+                  }
+                />
               ))
             )}
             {emptyProviders.length > 0 ? (
@@ -464,62 +277,62 @@ export default function Panel() {
               </Button>
             </Row>
 
+            {snap.agyPool.error ? (
+              <Callout tone="warning" title="AGY Quota Polling" icon="warning">
+                {snap.agyPool.error}
+              </Callout>
+            ) : null}
+
             {oauth ? (
-              <Card
-                title="Connect Google Account"
-                description="Sign in with Google (use Incognito to add another account). The plugin captures the callback automatically."
-              >
-                <Stack gap="sm">
-                  <Row gap="xs" wrap>
-                    <Button size="xs" variant="solid" tone="accent" icon="open-external" onPress={openOAuthInBrowser}>
-                      Open in Browser
-                    </Button>
-                    <Button size="xs" variant="ghost" onPress={cancelOAuthFlow}>
-                      Cancel
-                    </Button>
-                  </Row>
-                  <Text size="xs" muted>
-                    Or copy this URL into an Incognito browser window:
-                  </Text>
-                  <Code block>{oauth.authUrl}</Code>
-                  <Input
-                    label="Manual callback URL or code (optional)"
-                    placeholder="Paste http://127.0.0.1:.../auth/callback?code=... if needed"
-                    value={manualCallback}
-                    onChange={(v) => set(manualCallbackAtom, v)}
-                    onSubmit={completeManualOAuth}
-                  />
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={!manualCallback.trim() || busyKey !== null}
-                    onPress={completeManualOAuth}
-                  >
-                    Complete Sign-In
-                  </Button>
-                </Stack>
-              </Card>
+              <OAuthConnectCard
+                oauth={oauth}
+                manualCallback={manualCallback}
+                busyKey={busyKey}
+                onOpenBrowser={openOAuthInBrowser}
+                onCancel={cancelOAuthFlow}
+                onCallbackChange={(v) => set(manualCallbackAtom, v)}
+                onCompleteManual={completeManualOAuth}
+              />
+            ) : null}
+
+            {snap.agyPool.accounts.length > 3 ? (
+              <Input
+                label="Filter AGY accounts"
+                labelHidden
+                type="search"
+                placeholder="Filter by email or name…"
+                value={agyFilter}
+                onChange={(v) => set(agyFilterAtom, v)}
+              />
             ) : null}
 
             {!snap.agyPool.available ? (
+              <AgyEmptyState />
+            ) : filteredAgyAccounts.length === 0 ? (
               <EmptyState
-                icon="zap"
-                title="No AGY accounts saved yet"
-                description="Click 'Add Google Account' to sign in via OAuth or 'Import Current AGY' to capture your current agy CLI login — no external manager needed."
+                icon="search"
+                title="No matching accounts"
+                description={`No AGY account matched "${agyFilter}".`}
               />
             ) : (
-              snap.agyPool.accounts.map((acc) => (
+              filteredAgyAccounts.map((acc) => (
                 <AgyPoolRow
                   key={acc.email}
                   account={acc}
                   isBest={snap.agyPool.bestEmail === acc.email}
                   busyKey={busyKey}
+                  onSwitch={(key, email) => runAction(key, () => plugin.request('accounts.selectAgyPool', { email }))}
+                  onRemove={(key, email) =>
+                    runAction(key, () => plugin.request('accounts.removeVaultAccount', { email }))
+                  }
                 />
               ))
             )}
           </Stack>
         </Tab>
       </Tabs>
+
+      <DiagnosticsSection snap={snap} />
     </Stack>
   )
 }

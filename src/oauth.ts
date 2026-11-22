@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { decodeJwtPayload } from './keyring'
+import { asString } from './parse'
 import { findAgyCli, readJsonObject, type PlatformPaths } from './platform'
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo'
-const DEFAULT_SCOPES = [
+export const DEFAULT_SCOPES = [
   'https://www.googleapis.com/auth/cloud-platform',
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/userinfo.profile',
@@ -33,6 +34,7 @@ export type OAuthClientConfig = {
   tokenUri: string
   scopes: string[]
   rawTemplate: Record<string, unknown>
+  source?: 'settings' | 'orca-acp' | 'gemini-cli' | 'agy-binary'
 }
 
 export type OAuthExchangeResult = {
@@ -48,10 +50,6 @@ export type HttpFetcher = (
   url: string,
   init?: RequestInit
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>
-
-function asString(v: unknown): string | null {
-  return typeof v === 'string' && v.trim() ? v.trim() : null
-}
 
 /**
  * Resolve Google Desktop OAuth client credentials from local runtime artifacts without hardcoding secrets:
@@ -70,6 +68,7 @@ export function resolveOAuthClient(
       clientSecret: customSecret,
       tokenUri: GOOGLE_TOKEN_URL,
       scopes: DEFAULT_SCOPES,
+      source: 'settings',
       rawTemplate: {
         client_id: customId,
         client_secret: customSecret,
@@ -79,8 +78,13 @@ export function resolveOAuthClient(
     }
   }
 
-  for (const filePath of [paths.orcaAcpTokenPath, path.join(paths.geminiDir, 'oauth_creds.json')]) {
-    const obj = readJsonObject(filePath)
+  const fileCandidates: { path: string; source: 'orca-acp' | 'gemini-cli' }[] = [
+    { path: paths.orcaAcpTokenPath, source: 'orca-acp' },
+    { path: path.join(paths.geminiDir, 'oauth_creds.json'), source: 'gemini-cli' }
+  ]
+
+  for (const candidate of fileCandidates) {
+    const obj = readJsonObject(candidate.path)
     const clientId = asString(obj?.client_id)
     const clientSecret = asString(obj?.client_secret)
     if (obj && clientId && clientSecret) {
@@ -92,6 +96,7 @@ export function resolveOAuthClient(
         clientSecret,
         tokenUri: asString(obj.token_uri) ?? GOOGLE_TOKEN_URL,
         scopes: mergeAgyScopes(scopes),
+        source: candidate.source,
         rawTemplate: obj
       }
     }
@@ -138,6 +143,7 @@ function extractOAuthClientFromBinary(binPath: string): OAuthClientConfig | null
       clientSecret: secMatch[1],
       tokenUri: GOOGLE_TOKEN_URL,
       scopes: DEFAULT_SCOPES,
+      source: 'agy-binary',
       rawTemplate: {
         client_id: idMatch[1],
         client_secret: secMatch[1],
@@ -306,7 +312,8 @@ const ERROR_HTML = (msg: string) =>
 /** Start a local 127.0.0.1 loopback server to capture the Google OAuth callback automatically. */
 export async function startLoopbackOAuthFlow(
   client: OAuthClientConfig,
-  onCompleted: (result: { ok: true; account: OAuthExchangeResult } | { ok: false; error: string }) => void | Promise<void>
+  onCompleted: (result: { ok: true; account: OAuthExchangeResult } | { ok: false; error: string }) => void | Promise<void>,
+  fetcher?: HttpFetcher
 ): Promise<PendingOAuthFlow> {
   const state = randomBytes(16).toString('hex')
   const codeVerifier = randomBytes(32).toString('base64url')
@@ -339,7 +346,7 @@ export async function startLoopbackOAuthFlow(
     }
 
     try {
-      const account = await exchangeAuthorizationCode({ client, code, redirectUri, codeVerifier })
+      const account = await exchangeAuthorizationCode({ client, code, redirectUri, codeVerifier }, fetcher)
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(SUCCESS_HTML)
       close()
       await onCompleted({ ok: true, account })
@@ -352,8 +359,18 @@ export async function startLoopbackOAuthFlow(
   })
 
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => resolve())
+    const onListenError = (err: Error) => reject(err)
+    server.once('error', onListenError)
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onListenError)
+      resolve()
+    })
+  })
+
+  server.on('error', (err) => {
+    if (closed) return
+    close()
+    void onCompleted({ ok: false, error: `OAuth loopback server error: ${err.message}` })
   })
 
   const addr = server.address()

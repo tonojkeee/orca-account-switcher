@@ -2,6 +2,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { asString } from './parse'
 import {
   linkOrCopyFile,
   readJsonObject,
@@ -34,10 +35,6 @@ export type AgyCredentialBundle = {
   idToken: string | null
   scope: string
   oauthTemplate: Record<string, unknown> | null
-}
-
-function asString(v: unknown): string | null {
-  return typeof v === 'string' && v.trim() ? v.trim() : null
 }
 
 export function encodeGoKeyringPayload(jsonObj: Record<string, unknown>): string {

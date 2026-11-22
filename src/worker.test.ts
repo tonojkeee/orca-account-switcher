@@ -121,3 +121,58 @@ test('parseSettings enforces pollSeconds=0 default and >=600s minimum when enabl
   assert.equal(main.parseSettings({ pollSeconds: 60 }).pollSeconds, main.MIN_POLL_SECONDS)
   assert.equal(main.parseSettings({ pollSeconds: 900 }).pollSeconds, 900)
 })
+
+test('worker hydrates fresh cached lastSnapshot on init without extra quota API calls', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-worker-cache-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+    writeFileSync(
+      paths.orcaAcpTokenPath,
+      JSON.stringify({ client_id: 'cid', client_secret: 'csec', token_uri: 'https://oauth.test/token' })
+    )
+
+    let fetchCount = 0
+    const cachedSnapshot = {
+      platform: 'linux',
+      orcaCliFound: true,
+      orcaError: null,
+      providers: [],
+      agyPool: { available: false, oauthReady: true, activeEmail: null, accounts: [], bestEmail: null, error: null },
+      fetchedAt: Date.now() - 10_000
+    }
+    const host = mockHost({
+      storage: { lastSnapshot: cachedSnapshot },
+      secrets: {
+        'agyPool.v1': JSON.stringify([
+          { email: 'cached@gmail.com', name: 'Cached', source: 'oauth', addedAt: 1, refreshToken: 'rt-c' }
+        ])
+      },
+      settings: { pollSeconds: 0 }
+    })
+
+    const worker = await mountWorker(
+      { default: (orca) => main.default(orca, {
+        paths,
+        platform: 'other' as NodeJS.Platform,
+        findOrca: () => '/usr/bin/orca',
+        findAgy: () => null,
+        runner: async () => ({ code: 0, stdout: '{"ok":true,"result":{}}', stderr: '' }),
+        fetcher: async () => {
+          fetchCount++
+          return { ok: true, status: 200, json: async () => ({}) }
+        }
+      }), deactivate: main.deactivate },
+      { host }
+    )
+
+    // Allow init microtasks to settle; cached snapshot < 5m TTL avoids network quota call on startup.
+    await new Promise((r) => setTimeout(r, 20))
+    assert.equal(fetchCount, 0)
+    assert.equal((await worker.request('accounts.snapshot')).fetchedAt, cachedSnapshot.fetchedAt)
+    await worker.deactivate()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})

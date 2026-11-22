@@ -12,14 +12,14 @@ import {
 } from './agy-pool'
 import { resolvePlatformPaths } from './platform'
 
-test('parseCloudCodeQuotaResponse computes remaining % and effectiveGemini', () => {
+test('parseCloudCodeQuotaResponse computes remaining %, effectiveGemini, and resetTime timestamps', () => {
   const parsed = parseCloudCodeQuotaResponse({
     groups: [
       {
         displayName: 'Gemini Models',
         buckets: [
-          { window: '5h', remainingFraction: 0.8 },
-          { window: 'weekly', remainingFraction: 0.45 }
+          { window: '5h', remainingFraction: 0.8, resetTime: '2026-11-22T15:00:00Z' },
+          { window: 'weekly', remainingFraction: 0.45, resetTime: '2026-11-28T00:00:00Z' }
         ]
       },
       {
@@ -35,6 +35,8 @@ test('parseCloudCodeQuotaResponse computes remaining % and effectiveGemini', () 
   assert.equal(parsed.geminiWeekly, 45)
   assert.equal(parsed.effectiveGemini, 45)
   assert.equal(parsed.claudeWeekly, 90)
+  assert.equal(parsed.gemini5hResetsAt, Date.parse('2026-11-22T15:00:00Z'))
+  assert.equal(parsed.geminiWeeklyResetsAt, Date.parse('2026-11-28T00:00:00Z'))
 })
 
 test('fetchAgyPoolState and switchAgyPoolAccount merge Vault + AGY Tools and switch agy CLI without external managers', async () => {
@@ -187,6 +189,51 @@ test('fetchAgyPoolState polls sequentially with jitter and reuses cached access_
       jitterMs: () => 0
     })
     assert.equal(tokenCalls, 2)
+  } finally {
+    clearAgyTokenCache()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('fetchAgyPoolState trips 429 circuit breaker immediately without polling remaining accounts', async () => {
+  clearAgyTokenCache()
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-agy-429-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+    writeFileSync(
+      paths.orcaAcpTokenPath,
+      JSON.stringify({ client_id: 'cid', client_secret: 'csec', token_uri: 'https://oauth.test/token' })
+    )
+
+    const vaultAccounts = [
+      { email: 'one@gmail.com', name: 'One', source: 'oauth' as const, addedAt: 1, refreshToken: 'rt-429-1' },
+      { email: 'two@gmail.com', name: 'Two', source: 'oauth' as const, addedAt: 2, refreshToken: 'rt-429-2' },
+      { email: 'three@gmail.com', name: 'Three', source: 'oauth' as const, addedAt: 3, refreshToken: 'rt-429-3' }
+    ]
+
+    let quotaCalls = 0
+    const state = await fetchAgyPoolState({
+      paths,
+      platform: 'other' as NodeJS.Platform,
+      vaultAccounts,
+      jitterMs: () => 0,
+      fetcher: async (url) => {
+        if (url === 'https://oauth.test/token') {
+          return { ok: true, status: 200, json: async () => ({ access_token: 'at-429', expires_in: 3600 }) }
+        }
+        quotaCalls++
+        return { ok: false, status: 429, json: async () => ({}) }
+      }
+    })
+
+    assert.equal(quotaCalls, 1)
+    assert.ok(state.error?.includes('429'))
+    assert.equal(state.accounts.length, 3)
+    assert.equal(state.accounts[0].error, 'Quota HTTP 429')
+    assert.equal(state.accounts[1].error, 'Skipped (rate limit protection)')
+    assert.equal(state.accounts[2].error, 'Skipped (rate limit protection)')
   } finally {
     clearAgyTokenCache()
     rmSync(home, { recursive: true, force: true })

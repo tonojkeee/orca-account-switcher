@@ -39,6 +39,8 @@ export type AgyPoolAccount = {
   claude5h: number | null
   claudeWeekly: number | null
   effectiveGemini: number | null
+  gemini5hResetsAt?: number | null
+  geminiWeeklyResetsAt?: number | null
   error: string | null
 }
 
@@ -51,12 +53,20 @@ export type AgyPoolState = {
   error: string | null
 }
 
+export type RuntimeDiagnostics = {
+  orcaCliPath: string | null
+  agyCliPath: string | null
+  agyToolsCliPath: string | null
+  oauthClientSource: string | null
+}
+
 export type AccountsSnapshot = {
   platform: string
   orcaCliFound: boolean
   orcaError: string | null
   providers: OrcaProviderState[]
   agyPool: AgyPoolState
+  diagnostics?: RuntimeDiagnostics
   fetchedAt: number
 }
 

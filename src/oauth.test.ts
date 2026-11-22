@@ -106,3 +106,38 @@ test('startLoopbackOAuthFlow binds localhost port and handles error callback cle
     flow.close()
   }
 })
+
+test('startLoopbackOAuthFlow completes end-to-end callback exchange with injected fetcher', async () => {
+  const outcomes: { ok: boolean; email?: string }[] = []
+  const jwtBody = Buffer.from(JSON.stringify({ email: 'loop@gmail.com', name: 'Loopback' })).toString('base64url')
+  const flow = await startLoopbackOAuthFlow(
+    {
+      clientId: 'cid',
+      clientSecret: 'csec',
+      tokenUri: 'https://oauth.test/token',
+      scopes: ['openid'],
+      rawTemplate: {}
+    },
+    (outcome) => {
+      outcomes.push(outcome.ok ? { ok: true, email: outcome.account.email } : { ok: false })
+    },
+    async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'at-loop',
+        refresh_token: 'rt-loop',
+        id_token: `h.${jwtBody}.s`,
+        expires_in: 3600
+      })
+    })
+  )
+  try {
+    const resp = await fetch(`${flow.redirectUri}?code=good-code&state=${flow.state}`)
+    assert.equal(resp.status, 200)
+    assert.equal(outcomes.length, 1)
+    assert.deepEqual(outcomes[0], { ok: true, email: 'loop@gmail.com' })
+  } finally {
+    flow.close()
+  }
+})
