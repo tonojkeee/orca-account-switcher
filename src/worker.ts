@@ -107,6 +107,15 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     )
   }
 
+  function collectDiagnostics(oauthClient: OAuthClientConfig | null = getOAuthClient()) {
+    return {
+      orcaCliPath: resolveCli(),
+      agyCliPath: resolveAgyBin(),
+      agyToolsCliPath: findAgyToolsCli(platform),
+      oauthClientSource: oauthClient?.source ?? (oauthClient ? 'resolved' : null)
+    }
+  }
+
   async function safeHostCall(method: string, params: Record<string, unknown>): Promise<void> {
     try {
       await (orca.host.call as (m: string, p: Record<string, unknown>) => Promise<unknown>)(method, params)
@@ -166,12 +175,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
         orcaError: orcaRes.error,
         providers: orcaRes.providers,
         agyPool,
-        diagnostics: {
-          orcaCliPath: cliPath,
-          agyCliPath: resolveAgyBin(),
-          agyToolsCliPath: findAgyToolsCli(platform),
-          oauthClientSource: oauthClient?.source ?? (oauthClient ? 'resolved' : null)
-        },
+        diagnostics: collectDiagnostics(oauthClient),
         fetchedAt: Date.now()
       }
       latestSnapshot = snapshot
@@ -351,11 +355,15 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
 
     const cached = await orca.storage.get<AccountsSnapshot>('lastSnapshot').catch(() => undefined)
     if (cached && typeof cached.fetchedAt === 'number' && Array.isArray(cached.providers)) {
-      latestSnapshot = cached
-      await updateStatusBar(cached)
-      orca.panels.post('accounts.updated', cached)
-      if (Date.now() - cached.fetchedAt < DEFAULT_QUOTA_TTL_MS) {
-        await maybeAutoSwitch(cached)
+      const hydrated: AccountsSnapshot = {
+        ...cached,
+        diagnostics: collectDiagnostics()
+      }
+      latestSnapshot = hydrated
+      await updateStatusBar(hydrated)
+      orca.panels.post('accounts.updated', hydrated)
+      if (Date.now() - hydrated.fetchedAt < DEFAULT_QUOTA_TTL_MS) {
+        await maybeAutoSwitch(hydrated)
         return
       }
     }

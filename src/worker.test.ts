@@ -167,10 +167,13 @@ test('worker hydrates fresh cached lastSnapshot on init without extra quota API 
       { host }
     )
 
-    // Allow init microtasks to settle; cached snapshot < 5m TTL avoids network quota call on startup.
+    // Allow init microtasks to settle; cached snapshot < 5m TTL avoids network quota call on startup
+    // while still populating fresh local diagnostics even when upgrading from an older cached schema.
     await new Promise((r) => setTimeout(r, 20))
     assert.equal(fetchCount, 0)
-    assert.equal((await worker.request('accounts.snapshot')).fetchedAt, cachedSnapshot.fetchedAt)
+    const snap = await worker.request('accounts.snapshot')
+    assert.equal(snap.fetchedAt, cachedSnapshot.fetchedAt)
+    assert.equal(snap.diagnostics?.orcaCliPath, '/usr/bin/orca')
     await worker.deactivate()
   } finally {
     rmSync(home, { recursive: true, force: true })
