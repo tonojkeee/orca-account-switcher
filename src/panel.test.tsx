@@ -101,14 +101,18 @@ function makeSnapshot(activeOrcaId: string): AccountsSnapshot {
       oauthClientSource: 'orca-acp'
     },
     update: {
-      currentVersion: '0.2.0',
+      currentVersion: '0.2.1',
       latestVersion: '0.2.5',
       hasUpdate: true,
       dismissed: false,
       checkedAt: Date.now(),
       repoUrl: 'https://github.com/tonojkeee/orca-account-switcher',
       error: null
-    }
+    },
+    orcaLaunchLock:
+      activeOrcaId === 'ag-locked'
+        ? { selectedAccountId: 'ag-1', selectedLabel: 'one@gmail.com', activeEmail: 'unlinked@gmail.com' }
+        : null
   }
 }
 

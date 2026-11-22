@@ -1,7 +1,13 @@
 // Boundary parser and runner for Orca's native `orca account list` and `orca account select` CLI.
 import { asNumber, asRecord, asString } from './parse'
 import { findOrcaCli, runCommand, type ExecResult } from './platform'
-import type { OrcaAgentKind, OrcaManagedAccount, OrcaProviderState, QuotaBucket } from './protocol'
+import type {
+  OrcaAgentKind,
+  OrcaLaunchLock,
+  OrcaManagedAccount,
+  OrcaProviderState,
+  QuotaBucket
+} from './protocol'
 
 const PROVIDER_META: readonly { agent: OrcaAgentKind; title: string; supportsSystemDefault: boolean }[] = [
   { agent: 'antigravity', title: 'Antigravity', supportsSystemDefault: false },
@@ -88,6 +94,7 @@ function parseProviderAccounts(
   const byRuntime = asRecord(block?.activeAccountIdsByRuntime)
   const activeAccountId =
     asString(byRuntime?.host) ?? asString(block?.activeAccountId) ?? null
+  const selectedAccountId = asString(block?.selectedAccountId) ?? activeAccountId
 
   const accountsRaw = Array.isArray(block?.accounts) ? block.accounts : []
   const accounts: OrcaManagedAccount[] = []
@@ -120,6 +127,7 @@ function parseProviderAccounts(
     title: meta.title,
     supportsSystemDefault: meta.supportsSystemDefault,
     activeAccountId,
+    selectedAccountId,
     systemDefaultLabel,
     accounts
   }
@@ -154,6 +162,7 @@ export async function fetchOrcaAccounts(
         title: m.title,
         supportsSystemDefault: m.supportsSystemDefault,
         activeAccountId: null,
+        selectedAccountId: null,
         systemDefaultLabel: null,
         accounts: []
       })),
@@ -206,4 +215,46 @@ function extractCliError(stdout: string): string | null {
   } catch {
     return null
   }
+}
+
+export function computeOrcaLaunchLock(
+  providers: readonly OrcaProviderState[],
+  activeEmail: string | null
+): OrcaLaunchLock | null {
+  const antigravity = providers.find((p) => p.agent === 'antigravity')
+  const selectedId = antigravity?.selectedAccountId ?? antigravity?.activeAccountId ?? null
+  if (!antigravity || !selectedId) return null
+  if (antigravity.activeAccountId === selectedId) {
+    const selected = antigravity.accounts.find((a) => a.id === selectedId)
+    if (!activeEmail || !selected?.email || selected.email.toLowerCase() === activeEmail.toLowerCase()) {
+      return null
+    }
+  }
+  const selected = antigravity.accounts.find((a) => a.id === selectedId)
+  return {
+    selectedAccountId: selectedId,
+    selectedLabel: selected?.email ?? selected?.label ?? selectedId,
+    activeEmail
+  }
+}
+
+export async function syncOrcaAntigravityAfterAgySwitch(
+  email: string,
+  cliPath: string | null,
+  runner: CommandRunner,
+  fallbackProviders: readonly OrcaProviderState[] = []
+): Promise<string | null> {
+  const freshOrca = await fetchOrcaAccounts(cliPath, runner)
+  const providers = freshOrca.cliFound && !freshOrca.error ? freshOrca.providers : fallbackProviders
+  const antigravity = providers.find((p) => p.agent === 'antigravity')
+  const linked = antigravity?.accounts.find((a) => a.email?.toLowerCase() === email.toLowerCase())
+  if (linked) {
+    const sync = await selectOrcaAccount('antigravity', linked.id, cliPath, runner)
+    return sync.ok ? null : `Orca Antigravity sync warning: ${sync.message}`
+  }
+  const selectedId = antigravity?.selectedAccountId ?? antigravity?.activeAccountId ?? null
+  if (!selectedId) return null
+  const selected = antigravity?.accounts.find((a) => a.id === selectedId)
+  const selectedLabel = selected?.email ?? selected?.label ?? selectedId
+  return `Warning: Orca Antigravity is still pinned to ${selectedLabel}, so launching agy in Orca terminals will fail until ${email} is saved in Orca Settings > AI Provider Accounts or you switch back.`
 }

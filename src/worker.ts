@@ -13,7 +13,13 @@ import {
   type OAuthClientConfig,
   type PendingOAuthFlow
 } from './oauth'
-import { fetchOrcaAccounts, selectOrcaAccount, type CommandRunner } from './orca-cli'
+import {
+  computeOrcaLaunchLock,
+  fetchOrcaAccounts,
+  selectOrcaAccount,
+  syncOrcaAntigravityAfterAgySwitch,
+  type CommandRunner
+} from './orca-cli'
 import {
   findAgyCli,
   findAgyToolsCli,
@@ -165,6 +171,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
         agyPool,
         diagnostics: collectDiagnostics(oauthClient),
         update,
+        orcaLaunchLock: computeOrcaLaunchLock(orcaRes.providers, agyPool.activeEmail),
         fetchedAt: Date.now()
       }
       latestSnapshot = snapshot
@@ -221,18 +228,13 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     })
     let note = res.message
     if (res.ok) {
-      const providers =
-        preloaded?.providers ??
-        latestSnapshot?.providers ??
-        (await fetchOrcaAccounts(resolveCli(), runner)).providers
-      const antigravity = providers.find((p) => p.agent === 'antigravity')
-      const linked = antigravity?.accounts.find((a) => a.email?.toLowerCase() === email.toLowerCase())
-      if (linked) {
-        const orcaSync = await selectOrcaAccount('antigravity', linked.id, resolveCli(), runner)
-        if (!orcaSync.ok) {
-          note += `; Orca Antigravity sync warning: ${orcaSync.message}`
-        }
-      }
+      const warning = await syncOrcaAntigravityAfterAgySwitch(
+        email,
+        resolveCli(),
+        runner,
+        preloaded?.providers ?? latestSnapshot?.providers ?? []
+      )
+      if (warning) note += `; ${warning}`
     }
     const snapshot = await loadSnapshot(true, true)
     return { ok: res.ok, message: note, snapshot }
@@ -348,7 +350,8 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       const hydrated: AccountsSnapshot = {
         ...cached,
         diagnostics: collectDiagnostics(),
-        update
+        update,
+        orcaLaunchLock: computeOrcaLaunchLock(cached.providers, cached.agyPool.activeEmail)
       }
       latestSnapshot = hydrated
       await updateStatusBar(hydrated)

@@ -23,6 +23,7 @@ export type OrcaProviderState = {
   title: string
   supportsSystemDefault: boolean
   activeAccountId: string | null
+  selectedAccountId?: string | null
   systemDefaultLabel: string | null
   accounts: OrcaManagedAccount[]
 }
@@ -70,6 +71,12 @@ export type PluginUpdateInfo = {
   error: string | null
 }
 
+export type OrcaLaunchLock = {
+  selectedAccountId: string
+  selectedLabel: string
+  activeEmail: string | null
+}
+
 export type AccountsSnapshot = {
   platform: string
   orcaCliFound: boolean
@@ -78,6 +85,7 @@ export type AccountsSnapshot = {
   agyPool: AgyPoolState
   diagnostics?: RuntimeDiagnostics
   update?: PluginUpdateInfo
+  orcaLaunchLock?: OrcaLaunchLock | null
   fetchedAt: number
 }
 

@@ -42,7 +42,8 @@ const SAMPLE_LIST_JSON = JSON.stringify({
           }
         }
       ],
-      activeAccountId: 'ag-1'
+      activeAccountId: 'ag-1',
+      selectedAccountId: 'ag-2'
     }
   }
 })
@@ -51,6 +52,8 @@ test('parseOrcaAccountListJson normalizes providers, labels, and remaining quota
   const providers = parseOrcaAccountListJson(SAMPLE_LIST_JSON)
   const ag = providers.find((p) => p.agent === 'antigravity')!
   assert.equal(ag.accounts.length, 2)
+  assert.equal(ag.activeAccountId, 'ag-1')
+  assert.equal(ag.selectedAccountId, 'ag-2')
   assert.equal(ag.accounts[0].active, true)
   assert.equal(ag.accounts[0].effectiveRemaining, 10)
   assert.equal(ag.accounts[1].effectiveRemaining, 90)

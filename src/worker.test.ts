@@ -224,3 +224,75 @@ test('worker checks GitHub update once per version, shows notification, and supp
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('worker detects Orca native Antigravity launch lock when switching to an unlinked AGY Vault account', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-worker-lock-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+    writeFileSync(
+      paths.orcaAcpTokenPath,
+      JSON.stringify({ client_id: 'cid', client_secret: 'csec', token_uri: 'https://oauth.test/token' })
+    )
+    writeFileSync(path.join(paths.geminiDir, 'google_accounts.json'), JSON.stringify({ active: 'vault-only@gmail.com' }))
+
+    const host = mockHost({
+      settings: { pollSeconds: 0, checkUpdates: false }
+    })
+
+    const worker = await mountWorker(
+      {
+        default: (orca) =>
+          main.default(orca, {
+            paths,
+            platform: 'other' as NodeJS.Platform,
+            findOrca: () => '/usr/bin/orca',
+            findAgy: () => null,
+            updateFetcher: null,
+            readCurrentLogin: async () => ({
+              email: 'vault-only@gmail.com',
+              refreshToken: 'rt-vo',
+              accessToken: 'at-vo',
+              idToken: null,
+              source: 'jetski-file'
+            }),
+            runner: async () => ({
+              code: 0,
+              stderr: '',
+              stdout: JSON.stringify({
+                ok: true,
+                result: {
+                  antigravity: {
+                    accounts: [{ id: 'orca-ag-1', email: 'pinned@gmail.com' }],
+                    activeAccountId: null,
+                    selectedAccountId: 'orca-ag-1'
+                  }
+                }
+              })
+            }),
+            fetcher: async (url) => {
+              if (url === 'https://oauth.test/token') {
+                return { ok: true, status: 200, json: async () => ({ access_token: 'at-vo', expires_in: 3600 }) }
+              }
+              return { ok: true, status: 200, json: async () => ({ groups: [] }) }
+            }
+          }),
+        deactivate: main.deactivate
+      },
+      { host }
+    )
+
+    const imported = await worker.request('accounts.importCurrentAgy')
+    assert.equal(imported.ok, true)
+
+    const switched = await worker.request('accounts.selectAgyPool', { email: 'vault-only@gmail.com' })
+    assert.equal(switched.ok, true)
+    assert.ok(switched.message.includes('pinned to pinned@gmail.com'))
+    assert.equal(switched.snapshot.orcaLaunchLock?.selectedLabel, 'pinned@gmail.com')
+    assert.equal(switched.snapshot.orcaLaunchLock?.activeEmail, 'vault-only@gmail.com')
+    await worker.deactivate()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})

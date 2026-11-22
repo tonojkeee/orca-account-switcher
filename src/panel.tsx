@@ -25,6 +25,7 @@ import {
   AgyEmptyState,
   AgyPoolRow,
   DiagnosticsSection,
+  LaunchLockBanner,
   OAuthConnectCard,
   ProviderSection,
   UpdateBanner
@@ -222,6 +223,18 @@ export default function Panel() {
         <Callout tone="warning" title="Orca CLI" icon="warning">
           {snap.orcaError}
         </Callout>
+      ) : null}
+
+      {snap.orcaLaunchLock ? (
+        <LaunchLockBanner
+          lock={snap.orcaLaunchLock}
+          busyKey={busyKey}
+          onRevertToOrcaSelected={(accountId) =>
+            runAction(`orca:antigravity:${accountId}`, () =>
+              plugin.request('accounts.selectOrca', { agent: 'antigravity', account: accountId })
+            )
+          }
+        />
       ) : null}
 
       {snap.update ? (

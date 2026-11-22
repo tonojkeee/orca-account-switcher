@@ -23,6 +23,7 @@ import type {
   AgyPoolAccount,
   OAuthStartResult,
   OrcaAgentKind,
+  OrcaLaunchLock,
   OrcaManagedAccount,
   OrcaProviderState,
   PluginUpdateInfo
@@ -326,6 +327,43 @@ export function OAuthConnectCard({
         </Button>
       </Stack>
     </Card>
+  )
+}
+
+export function LaunchLockBanner({
+  lock,
+  busyKey,
+  onRevertToOrcaSelected
+}: {
+  lock: OrcaLaunchLock
+  busyKey: string | null
+  onRevertToOrcaSelected: (accountId: string) => void
+}) {
+  return (
+    <Callout tone="warning" title="Orca terminal launch lock (Antigravity)" icon="warning">
+      <Stack gap="xs">
+        <Text size="xs">
+          Orca is pinned to {lock.selectedLabel}, while agy CLI is on {lock.activeEmail ?? 'another account'}.
+          Launching agy in an Orca terminal will fail unless both match.
+        </Text>
+        <Text size="xs" muted>
+          Fix: open Orca Settings &gt; AI Provider Accounts &gt; Antigravity and save the current login (or remove
+          pinned Antigravity accounts), or switch back below.
+        </Text>
+        <Row gap="xs" wrap>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={busyKey !== null}
+            onPress={() => onRevertToOrcaSelected(lock.selectedAccountId)}
+          >
+            {busyKey === `orca:antigravity:${lock.selectedAccountId}`
+              ? 'Switching…'
+              : `Use ${lock.selectedLabel}`}
+          </Button>
+        </Row>
+      </Stack>
+    </Callout>
   )
 }
 

@@ -321,7 +321,18 @@ export async function writeAgyCliCredentials(
   const keyringPayload: Record<string, unknown> = {
     token: agyTokenPayload.token,
     auth_method: 'consumer',
-    id_token_email: bundle.email
+    id_token_email: bundle.email,
+    ...(bundle.idToken ? { id_token: bundle.idToken } : {})
+  }
+
+  // Windows CredWriteW caps credential blobs at 2560 bytes (CRED_MAX_CREDENTIAL_BLOB_SIZE).
+  // Omit id_token on win32 only if the base64 keyring payload would exceed that limit.
+  if (
+    platform === 'win32' &&
+    keyringPayload.id_token &&
+    Buffer.byteLength(encodeGoKeyringPayload(keyringPayload), 'utf8') > 2500
+  ) {
+    delete keyringPayload.id_token
   }
 
   const keyringWritten = await writeAgyKeyringEntry(keyringPayload, platform)
