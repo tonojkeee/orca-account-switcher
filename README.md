@@ -54,8 +54,44 @@ orca plugin open tonojkeee.account-switcher
    orca plugin open local.account-switcher
    ```
 
-> **Windows (`PowerShell` / `cmd`)**: если `orca` не найден в `PATH`, вызывайте его по полному пути:
-> `"%LOCALAPPDATA%\Programs\Orca\resources\bin\orca.cmd" plugin install tonojkeee/orca-account-switcher`
+> **Windows**: если `orca` не найден в `PATH`, вызывайте полный путь с разным синтаксисом для **PowerShell** и **cmd.exe**:
+> - **PowerShell**: `& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.cmd" plugin install tonojkeee/orca-account-switcher`
+> - **cmd.exe**: `"%LOCALAPPDATA%\Programs\Orca\resources\bin\orca.cmd" plugin install tonojkeee/orca-account-switcher`
+
+---
+
+## Обновление плагина
+
+### Windows (PowerShell — терминал по умолчанию)
+
+```powershell
+# 1. Найти exe/cmd Orca автоматически: если `orca` есть в PATH:
+orca plugin update --all
+
+# 2. Если `orca` не в PATH (самый частый случай на Windows — нужен оператор `&` и `$env:LOCALAPPDATA`):
+& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.cmd" plugin update --all
+```
+
+### Windows (cmd.exe — Командная строка)
+
+```cmd
+"%LOCALAPPDATA%\Programs\Orca\resources\bin\orca.cmd" plugin update --all
+```
+
+### macOS / Linux
+
+```bash
+orca plugin update --all
+```
+
+> **Важные нюансы при обновлении на Windows**:
+> - **Если Orca вывела `approval_required` / `ap1-...`** — повторите ту же команду, добавив `--approve ap1-<ваш_fingerprint>` в конце.
+> - **Если плагин ставился из локальной папки (`install .`)** — сначала обновите папку (`git pull`), а затем запустите `update local.account-switcher` (или переустановите: `& "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.cmd" plugin install .`).
+> - **Если `update --all` всё равно не подтянул новую версию** — посмотрите ключ плагина через `plugin list` и установите свежую версию напрямую:
+>   ```powershell
+>   & "$env:LOCALAPPDATA\Programs\Orca\resources\bin\orca.cmd" plugin install tonojkeee/orca-account-switcher
+>   ```
+>   (при запросе подтверждения добавьте `--approve ap1-...`; сохранённые аккаунты в AGY Vault останутся на месте).
 
 ---
 
