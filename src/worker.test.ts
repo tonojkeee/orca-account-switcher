@@ -296,3 +296,66 @@ test('worker detects Orca native Antigravity launch lock when switching to an un
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('worker auto-reconciles Orca selectedAccountId when live agy login already exists in Orca list', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-worker-reconcile-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+
+    let selectedId = 'orca-old'
+    const selectCalls: string[] = []
+    const host = mockHost({
+      settings: { pollSeconds: 0, showAgyPool: false, checkUpdates: false }
+    })
+
+    const worker = await mountWorker(
+      {
+        default: (orca) =>
+          main.default(orca, {
+            paths,
+            platform: 'other' as NodeJS.Platform,
+            findOrca: () => '/usr/bin/orca',
+            findAgy: () => null,
+            updateFetcher: null,
+            runner: async (_exe, args) => {
+              if (args[1] === 'select') {
+                selectedId = args[5]
+                selectCalls.push(selectedId)
+                return { code: 0, stdout: '{"ok":true}', stderr: '' }
+              }
+              return {
+                code: 0,
+                stderr: '',
+                stdout: JSON.stringify({
+                  ok: true,
+                  result: {
+                    antigravity: {
+                      accounts: [
+                        { id: 'orca-old', email: 'old@gmail.com' },
+                        { id: 'orca-saved-live', email: 'live@gmail.com' }
+                      ],
+                      activeAccountId: 'orca-saved-live',
+                      selectedAccountId: selectedId
+                    }
+                  }
+                })
+              }
+            }
+          }),
+        deactivate: main.deactivate
+      },
+      { host }
+    )
+
+    const snap = await worker.request('accounts.snapshot', { refreshQuotas: true, force: true })
+    assert.deepEqual(selectCalls, ['orca-saved-live'])
+    assert.equal(snap.orcaLaunchLock, null)
+    const ag = snap.providers.find((p) => p.agent === 'antigravity')!
+    assert.equal(ag.selectedAccountId, 'orca-saved-live')
+    await worker.deactivate()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})

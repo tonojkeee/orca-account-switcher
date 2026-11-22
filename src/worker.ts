@@ -16,6 +16,7 @@ import {
 import {
   computeOrcaLaunchLock,
   fetchOrcaAccounts,
+  reconcileOrcaAntigravitySelection,
   selectOrcaAccount,
   syncOrcaAntigravityAfterAgySwitch,
   type CommandRunner
@@ -163,15 +164,20 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
         runUpdateCheck(force)
       ])
 
+      const providers =
+        orcaRes.cliFound && !orcaRes.error
+          ? await reconcileOrcaAntigravitySelection(orcaRes.providers, agyPool.activeEmail, cliPath, runner)
+          : orcaRes.providers
+
       const snapshot: AccountsSnapshot = {
         platform,
         orcaCliFound: orcaRes.cliFound,
         orcaError: orcaRes.error,
-        providers: orcaRes.providers,
+        providers,
         agyPool,
         diagnostics: collectDiagnostics(oauthClient),
         update,
-        orcaLaunchLock: computeOrcaLaunchLock(orcaRes.providers, agyPool.activeEmail),
+        orcaLaunchLock: computeOrcaLaunchLock(providers, agyPool.activeEmail),
         fetchedAt: Date.now()
       }
       latestSnapshot = snapshot
@@ -346,14 +352,36 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
 
     const cached = await orca.storage.get<AccountsSnapshot>('lastSnapshot').catch(() => undefined)
     if (cached && typeof cached.fetchedAt === 'number' && Array.isArray(cached.providers)) {
+      const cliPath = resolveCli()
+      const currentLogin = deps.readCurrentLogin
+        ? await deps.readCurrentLogin().catch(() => null)
+        : await readCurrentAgyLogin(paths, platform).catch(() => null)
+      const liveEmail = currentLogin?.email ?? cached.agyPool.activeEmail
+      const freshOrca = await fetchOrcaAccounts(cliPath, runner)
+      const providers =
+        freshOrca.cliFound && !freshOrca.error
+          ? await reconcileOrcaAntigravitySelection(freshOrca.providers, liveEmail, cliPath, runner)
+          : cached.providers
       const update = await runUpdateCheck(false)
       const hydrated: AccountsSnapshot = {
         ...cached,
+        orcaCliFound: freshOrca.cliFound || cached.orcaCliFound,
+        orcaError: freshOrca.error,
+        providers,
+        agyPool: {
+          ...cached.agyPool,
+          activeEmail: liveEmail,
+          accounts: cached.agyPool.accounts.map((a) => ({
+            ...a,
+            active: liveEmail !== null && a.email.toLowerCase() === liveEmail.toLowerCase()
+          }))
+        },
         diagnostics: collectDiagnostics(),
         update,
-        orcaLaunchLock: computeOrcaLaunchLock(cached.providers, cached.agyPool.activeEmail)
+        orcaLaunchLock: computeOrcaLaunchLock(providers, liveEmail)
       }
       latestSnapshot = hydrated
+      await orca.storage.set('lastSnapshot', hydrated).catch(() => undefined)
       await updateStatusBar(hydrated)
       orca.panels.post('accounts.updated', hydrated)
       if (Date.now() - hydrated.fetchedAt < DEFAULT_QUOTA_TTL_MS) {

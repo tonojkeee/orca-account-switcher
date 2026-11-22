@@ -258,3 +258,34 @@ export async function syncOrcaAntigravityAfterAgySwitch(
   const selectedLabel = selected?.email ?? selected?.label ?? selectedId
   return `Warning: Orca Antigravity is still pinned to ${selectedLabel}, so launching agy in Orca terminals will fail until ${email} is saved in Orca Settings > AI Provider Accounts or you switch back.`
 }
+
+/**
+ * If the live agy login already exists in Orca's Antigravity list (e.g. just saved in Orca Settings)
+ * while Orca's `selectedAccountId` is still pinned to an older account, select the matching account
+ * automatically so `prepareForLaunch()` does not block terminal launches.
+ */
+export async function reconcileOrcaAntigravitySelection(
+  providers: readonly OrcaProviderState[],
+  activeEmail: string | null,
+  cliPath: string | null,
+  runner: CommandRunner
+): Promise<OrcaProviderState[]> {
+  const mutable = [...providers]
+  if (!cliPath) return mutable
+  const antigravity = mutable.find((p) => p.agent === 'antigravity')
+  const selectedId = antigravity?.selectedAccountId ?? null
+  if (!antigravity || !selectedId) return mutable
+
+  const targetId =
+    antigravity.activeAccountId ??
+    (activeEmail
+      ? antigravity.accounts.find((a) => a.email?.toLowerCase() === activeEmail.toLowerCase())?.id ?? null
+      : null)
+
+  if (!targetId || targetId === selectedId) return mutable
+
+  const synced = await selectOrcaAccount('antigravity', targetId, cliPath, runner)
+  if (!synced.ok) return mutable
+  const refreshed = await fetchOrcaAccounts(cliPath, runner)
+  return refreshed.cliFound && !refreshed.error ? refreshed.providers : mutable
+}
