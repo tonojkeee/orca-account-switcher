@@ -62,19 +62,36 @@ test('findOrcaCli discovers PATH and platform fallback binaries', () => {
   )
 })
 
-test('sanitizeChildEnv strips ELECTRON_RUN_AS_NODE and buildCommandInvocation wraps Windows .cmd verbatim', () => {
-  const clean = sanitizeChildEnv({
-    PATH: '/usr/bin',
-    ELECTRON_RUN_AS_NODE: '1',
-    NODE_OPTIONS: '--inspect',
-    ORCA_CLI_COMMAND: 'C:\\orca.cmd',
-    ORCA_CLI_HANDOFF: 'C:\\orca.cmd'
-  })
+test('sanitizeChildEnv strips ELECTRON_RUN_AS_NODE, sets Windows APPDATA/ORCA_USER_DATA_PATH, and wraps Windows .cmd verbatim', () => {
+  const clean = sanitizeChildEnv(
+    {
+      PATH: '/usr/bin',
+      ELECTRON_RUN_AS_NODE: '1',
+      NODE_OPTIONS: '--inspect',
+      ORCA_CLI_COMMAND: 'C:\\orca.cmd',
+      ORCA_CLI_HANDOFF: 'C:\\orca.cmd'
+    },
+    'linux',
+    '/home/alex'
+  )
   assert.equal(clean.ELECTRON_RUN_AS_NODE, undefined)
   assert.equal(clean.NODE_OPTIONS, undefined)
   assert.equal(clean.ORCA_CLI_COMMAND, undefined)
   assert.equal(clean.ORCA_CLI_HANDOFF, undefined)
   assert.equal(clean.PATH, '/usr/bin')
+  assert.equal(clean.HOME, '/home/alex')
+
+  // Windows worker env often lacks APPDATA or has mixed-case Path; ensure canonical APPDATA & ORCA_USER_DATA_PATH are synthesized
+  const winClean = sanitizeChildEnv(
+    { Path: 'C:\\Windows\\System32', USERPROFILE: 'C:\\Users\\quiet' },
+    'win32',
+    'C:\\Users\\quiet'
+  )
+  assert.equal(winClean.APPDATA, 'C:\\Users\\quiet\\AppData\\Roaming')
+  assert.equal(winClean.LOCALAPPDATA, 'C:\\Users\\quiet\\AppData\\Local')
+  assert.equal(winClean.ORCA_USER_DATA_PATH, 'C:\\Users\\quiet\\AppData\\Roaming\\orca')
+  assert.equal(winClean.PATH, 'C:\\Windows\\System32')
+  assert.equal(winClean.Path, undefined)
 
   const winCmd = buildCommandInvocation('C:\\Program Files\\Orca\\orca.cmd', ['account', 'list', '--json'], 'win32', {
     ComSpec: 'C:\\Windows\\System32\\cmd.exe'

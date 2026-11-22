@@ -61,11 +61,65 @@ function resolveOrcaUserDataDir(platform: PlatformKind, env: NodeJS.ProcessEnv, 
   return p.join(xdgConfig, 'orca')
 }
 
+function readEnvCI(source: NodeJS.ProcessEnv, target: string): string | null {
+  const exact = source[target]?.trim()
+  if (exact) return exact
+  const upper = target.toUpperCase()
+  for (const [k, v] of Object.entries(source)) {
+    if (k.toUpperCase() === upper && typeof v === 'string' && v.trim()) {
+      return v.trim()
+    }
+  }
+  return null
+}
+
+function setEnvCanonical(target: NodeJS.ProcessEnv, canonicalKey: string, value: string): void {
+  const upper = canonicalKey.toUpperCase()
+  for (const k of Object.keys(target)) {
+    if (k.toUpperCase() === upper && k !== canonicalKey) {
+      delete target[k]
+    }
+  }
+  target[canonicalKey] = value
+}
+
 /** Return sanitized environment safe for spawning external CLIs from an Orca plugin worker. */
-export function sanitizeChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function sanitizeChildEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: PlatformKind = process.platform,
+  home: string = homedir()
+): NodeJS.ProcessEnv {
   const clean: NodeJS.ProcessEnv = { ...env }
   for (const key of STRIPPED_WORKER_ENV_VARS) {
     delete clean[key]
+  }
+
+  if (platform === 'win32') {
+    const userHome = readEnvCI(clean, 'USERPROFILE') || readEnvCI(clean, 'HOME') || home
+    const userDataOverride = readEnvCI(clean, 'ORCA_USER_DATA_PATH')
+    const appData =
+      readEnvCI(clean, 'APPDATA') ||
+      (userDataOverride ? path.win32.dirname(userDataOverride) : path.win32.join(userHome, 'AppData', 'Roaming'))
+    const localAppData = readEnvCI(clean, 'LOCALAPPDATA') || path.win32.join(userHome, 'AppData', 'Local')
+    const sysRoot = readEnvCI(clean, 'SystemRoot') || readEnvCI(clean, 'WINDIR') || 'C:\\Windows'
+    const comspec = readEnvCI(clean, 'ComSpec') || path.win32.join(sysRoot, 'System32', 'cmd.exe')
+    const tempDir = readEnvCI(clean, 'TEMP') || readEnvCI(clean, 'TMP') || path.win32.join(localAppData, 'Temp')
+    const pathVal = readEnvCI(clean, 'PATH')
+
+    setEnvCanonical(clean, 'USERPROFILE', userHome)
+    setEnvCanonical(clean, 'APPDATA', appData)
+    setEnvCanonical(clean, 'LOCALAPPDATA', localAppData)
+    setEnvCanonical(clean, 'ORCA_USER_DATA_PATH', userDataOverride || path.win32.join(appData, 'orca'))
+    setEnvCanonical(clean, 'SystemRoot', sysRoot)
+    setEnvCanonical(clean, 'ComSpec', comspec)
+    setEnvCanonical(clean, 'TEMP', tempDir)
+    setEnvCanonical(clean, 'TMP', tempDir)
+    if (pathVal) setEnvCanonical(clean, 'PATH', pathVal)
+    return clean
+  }
+
+  if (!clean.HOME?.trim() && home) {
+    clean.HOME = home
   }
   return clean
 }
