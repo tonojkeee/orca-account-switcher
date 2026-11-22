@@ -1,0 +1,121 @@
+{
+  "manifestVersion": 2,
+  "id": "account-switcher",
+  "name": "Account Switcher",
+  "version": "0.1.0",
+  "description": "Cross-platform on-the-fly account switcher for Orca managed agents, agy CLI, and built-in Google OAuth vault with live quotas.",
+  "license": "MIT",
+  "repository": "https://github.com/tonojkeee/orca-account-switcher",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "account-switcher",
+        "title": "Accounts",
+        "icon": "agent",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "active-account",
+        "text": "Accounts",
+        "icon": "agent",
+        "tone": "neutral",
+        "tooltip": "Account Switcher: loading active account",
+        "command": "accountSwitcher.statusAction"
+      }
+    ],
+    "commands": [
+      {
+        "id": "accountSwitcher.refresh",
+        "title": "Account Switcher: Refresh Accounts & Quotas"
+      },
+      {
+        "id": "accountSwitcher.switchBest",
+        "title": "Account Switcher: Switch to Best Gemini Account"
+      },
+      {
+        "id": "accountSwitcher.statusAction",
+        "title": "Account Switcher: Status Bar Action"
+      }
+    ],
+    "settings": [
+      {
+        "key": "pollSeconds",
+        "title": "Auto-refresh interval (seconds)",
+        "description": "Background refresh interval in seconds. 0 (recommended) disables background polling (manual Refresh / Best only); any non-zero value enforces a 600s minimum.",
+        "type": "integer",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 3600
+      },
+      {
+        "key": "statusClickAction",
+        "title": "Status bar click action",
+        "description": "What clicking the Account Switcher status bar item does.",
+        "type": "string",
+        "default": "refresh",
+        "enum": ["refresh", "switchBest"],
+        "enumLabels": ["Refresh accounts & quotas", "Switch to best Gemini quota account"]
+      },
+      {
+        "key": "showAgyPool",
+        "title": "Enable AGY / Google Vault",
+        "description": "Manage built-in Google OAuth vault and ~/.antigravity_tools/accounts (if present) for on-the-fly agy CLI + Orca switching.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "autoSwitchLowQuota",
+        "title": "Auto-switch Antigravity on low quota",
+        "description": "Automatically switch to the highest-quota AGY account when active effective Gemini quota drops below the threshold.",
+        "type": "boolean",
+        "default": false
+      },
+      {
+        "key": "lowQuotaThreshold",
+        "title": "Low quota threshold (%)",
+        "description": "Effective Gemini remaining % below which auto-switch triggers.",
+        "type": "integer",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 50
+      },
+      {
+        "key": "oauthClientId",
+        "title": "Custom Google OAuth Client ID (optional)",
+        "description": "Optional override when neither Orca acp_token.json nor agy CLI is initialized yet.",
+        "type": "string",
+        "default": ""
+      },
+      {
+        "key": "oauthClientSecret",
+        "title": "Custom Google OAuth Client Secret (optional)",
+        "description": "Optional override paired with Custom Google OAuth Client ID.",
+        "type": "string",
+        "default": ""
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "secrets:own"
+    },
+    {
+      "kind": "settings:own"
+    },
+    {
+      "kind": "notifications:show"
+    }
+  ]
+}
