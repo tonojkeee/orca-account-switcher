@@ -105,6 +105,9 @@ function parseProviderAccounts(
     if (!raw || !id) continue
     const active = id === activeAccountId
     const buckets = parseUsageBuckets(raw.usage ?? (active ? activeFallbackUsage : null))
+    const tok = asRecord(raw.token)
+    const refreshToken = asString(tok?.refresh_token) ?? asString(raw.refreshToken) ?? asString(raw.refresh_token) ?? null
+    const accessToken = asString(tok?.access_token) ?? asString(raw.accessToken) ?? asString(raw.access_token) ?? null
     accounts.push({
       id,
       label: formatAccountLabel(raw, id),
@@ -112,7 +115,9 @@ function parseProviderAccounts(
       active,
       needsSignIn: raw.needsSignIn === true,
       buckets,
-      effectiveRemaining: computeEffectiveRemaining(buckets)
+      effectiveRemaining: computeEffectiveRemaining(buckets),
+      ...(refreshToken ? { refreshToken } : {}),
+      ...(accessToken ? { accessToken } : {})
     })
   }
 

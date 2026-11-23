@@ -1,6 +1,6 @@
 // Orca plugin worker: polls account states, updates status bar, manages built-in OAuth vault & live switches.
 import type { OrcaWorkerApi } from 'orca/worker'
-import { fetchAgyPoolState, switchAgyPoolAccount, warmAgyTokenCache, type QuotaFetcher } from './agy-pool'
+import { fetchAgyPoolState, warmAgyTokenCache, type QuotaFetcher } from './agy-pool'
 import { readCurrentAgyLogin, type AgyStoredToken } from './keyring'
 import {
   exchangeAuthorizationCode,
@@ -17,7 +17,6 @@ import {
   fetchOrcaAccounts,
   reconcileOrcaAntigravitySelection,
   selectOrcaAccount,
-  syncOrcaAntigravityAfterAgySwitch,
   type CommandRunner
 } from './orca-cli'
 import {
@@ -30,6 +29,11 @@ import {
 } from './platform'
 import type { AccountsSnapshot, OrcaAgentKind, PluginUpdateInfo, SwitchResult } from './protocol'
 import { buildStatusBarState } from './status'
+import {
+  hydrateCachedSnapshot,
+  performAgySwitchAction,
+  syncAgyCredentialsAfterOrcaSelect
+} from './sync'
 import {
   applyPluginSelfUpdate,
   dismissStoredUpdateVersion,
@@ -224,31 +228,47 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
 
   async function performOrcaSelect(agent: OrcaAgentKind, account: string): Promise<SwitchResult> {
     const res = await selectOrcaAccount(agent, account, resolveCli(), runner)
+    if (!res.ok) {
+      const snapshot = latestSnapshot ?? (await loadSnapshot(false))
+      return { ok: false, message: res.message, snapshot }
+    }
+
+    let note = res.message
+    if (agent === 'antigravity') {
+      const syncRes = await syncAgyCredentialsAfterOrcaSelect({
+        orca,
+        account,
+        paths,
+        platform,
+        cliPath: resolveCli(),
+        runner,
+        providers: latestSnapshot?.providers,
+        oauthClients: getOAuthCandidates(),
+        fetcher: deps.fetcher
+      })
+      if (syncRes.message) {
+        note += `; ${syncRes.message}`
+      }
+    }
+
     const snapshot = await loadSnapshot(true, true)
-    return { ok: res.ok, message: res.message, snapshot }
+    return { ok: true, message: note, snapshot }
   }
 
   async function performAgySwitch(email: string, preloaded?: AccountsSnapshot): Promise<SwitchResult> {
-    const vaultAccounts = await listVaultAccounts(orca)
-    const res = await switchAgyPoolAccount(email, {
+    const res = await performAgySwitchAction({
+      orca,
+      email,
       paths,
       platform,
-      vaultAccounts,
+      cliPath: resolveCli(),
+      runner,
+      providers: preloaded?.providers ?? latestSnapshot?.providers ?? [],
       oauthClients: getOAuthCandidates(),
       fetcher: deps.fetcher
     })
-    let note = res.message
-    if (res.ok) {
-      const warning = await syncOrcaAntigravityAfterAgySwitch(
-        email,
-        resolveCli(),
-        runner,
-        preloaded?.providers ?? latestSnapshot?.providers ?? []
-      )
-      if (warning) note += `; ${warning}`
-    }
     const snapshot = await loadSnapshot(true, true)
-    return { ok: res.ok, message: note, snapshot }
+    return { ok: res.ok, message: res.message, snapshot }
   }
 
   async function performSwitchBest(): Promise<SwitchResult> {
@@ -354,23 +374,14 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
           ? await reconcileOrcaAntigravitySelection(freshOrca.providers, liveEmail, cliPath, runner)
           : cached.providers
       const update = await runUpdateCheck(false)
-      const hydrated: AccountsSnapshot = {
-        ...cached,
-        orcaCliFound: freshOrca.cliFound || cached.orcaCliFound,
-        orcaError: freshOrca.error,
+      const hydrated = hydrateCachedSnapshot(
+        cached,
+        liveEmail,
+        freshOrca,
         providers,
-        agyPool: {
-          ...cached.agyPool,
-          activeEmail: liveEmail,
-          accounts: cached.agyPool.accounts.map((a) => ({
-            ...a,
-            active: liveEmail !== null && a.email.toLowerCase() === liveEmail.toLowerCase()
-          }))
-        },
-        diagnostics: collectDiagnostics(),
         update,
-        orcaLaunchLock: computeOrcaLaunchLock(providers, liveEmail)
-      }
+        collectDiagnostics()
+      )
       latestSnapshot = hydrated
       await orca.storage.set('lastSnapshot', hydrated).catch(() => undefined)
       await updateStatusBar(hydrated)

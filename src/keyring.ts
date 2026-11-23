@@ -1,6 +1,6 @@
 // Cross-platform OS keyring and ~/.gemini credential reader/writer for `agy` CLI and Orca ACP.
 import { execFile, spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, utimesSync } from 'node:fs'
 import path from 'node:path'
 import { asString } from './parse'
 import {
@@ -15,6 +15,8 @@ import {
 const KEYRING_PREFIX = 'go-keyring-base64:'
 const KEYRING_SERVICE = 'gemini'
 const KEYRING_ACCOUNT = 'antigravity'
+const ALT_KEYRING_SERVICE = 'gemini:antigravity'
+const ALT_KEYRING_ACCOUNT = 'account'
 const WINDOWS_TARGET = `${KEYRING_SERVICE}:${KEYRING_ACCOUNT}`
 
 export type AgyStoredToken = {
@@ -192,7 +194,12 @@ function encodePowerShellCommand(script: string): string {
 export async function readAgyKeyringEntry(platform: PlatformKind = process.platform): Promise<Record<string, unknown> | null> {
   if (platform === 'darwin') {
     const res = await execText('security', ['find-generic-password', '-s', KEYRING_SERVICE, '-a', KEYRING_ACCOUNT, '-w'])
-    return res.code === 0 ? decodeGoKeyringPayload(res.stdout) : null
+    if (res.code === 0) {
+      const decoded = decodeGoKeyringPayload(res.stdout)
+      if (decoded) return decoded
+    }
+    const altRes = await execText('security', ['find-generic-password', '-s', ALT_KEYRING_SERVICE, '-a', ALT_KEYRING_ACCOUNT, '-w'])
+    return altRes.code === 0 ? decodeGoKeyringPayload(altRes.stdout) : null
   }
   if (platform === 'linux') {
     const res = await execText('secret-tool', ['lookup', 'service', KEYRING_SERVICE, 'account', KEYRING_ACCOUNT])
@@ -216,8 +223,7 @@ export async function writeAgyKeyringEntry(
 ): Promise<boolean> {
   const encoded = encodeGoKeyringPayload(payload)
   if (platform === 'darwin') {
-    // Use stdin `-i` mode? `security` doesn't support `-w` via stdin cleanly, so update via add-generic-password.
-    return new Promise((resolve) => {
+    const pPrimary = new Promise<boolean>((resolve) => {
       execFile(
         'security',
         ['add-generic-password', '-U', '-s', KEYRING_SERVICE, '-a', KEYRING_ACCOUNT, '-w', encoded],
@@ -225,6 +231,16 @@ export async function writeAgyKeyringEntry(
         (err) => resolve(!err)
       )
     })
+    const pAlt = new Promise<boolean>((resolve) => {
+      execFile(
+        'security',
+        ['add-generic-password', '-U', '-s', ALT_KEYRING_SERVICE, '-a', ALT_KEYRING_ACCOUNT, '-w', encoded],
+        { env: sanitizeChildEnv(process.env), timeout: 8000 },
+        (err) => resolve(!err)
+      )
+    })
+    const [okPrimary, okAlt] = await Promise.all([pPrimary, pAlt])
+    return okPrimary || okAlt
   }
   if (platform === 'linux') {
     const res = await execText(
@@ -392,5 +408,39 @@ export async function writeAgyCliCredentials(
     }
   }
 
+  invalidateAgyAcpSession(paths)
+
   return { keyringWritten, warnings }
+}
+
+export function touchFile(filePath: string): boolean {
+  try {
+    if (existsSync(filePath)) {
+      const now = new Date()
+      utimesSync(filePath, now, now)
+      return true
+    }
+  } catch {
+    // Ignore
+  }
+  return false
+}
+
+export function invalidateAgyAcpSession(paths: PlatformPaths): { success: boolean; timestamp: number } {
+  const timestamp = Date.now()
+  const payload = JSON.stringify({ timestamp, updatedIso: new Date(timestamp).toISOString() }, null, 2)
+  try {
+    writeFileAtomic(path.join(paths.orcaAcpDir, '.token_timestamp'), payload)
+  } catch {
+    // Ignore
+  }
+  try {
+    writeFileAtomic(path.join(paths.geminiDir, '.token_timestamp'), payload)
+  } catch {
+    // Ignore
+  }
+  touchFile(paths.orcaAcpTokenPath)
+  touchFile(path.join(paths.geminiDir, 'jetski-standalone-oauth-token'))
+  touchFile(path.join(paths.orcaChatDir, 'jetski-standalone-oauth-token'))
+  return { success: true, timestamp }
 }

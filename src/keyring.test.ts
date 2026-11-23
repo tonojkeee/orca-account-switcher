@@ -77,6 +77,8 @@ test('readCurrentAgyLogin and writeAgyCliCredentials update all ~/.gemini and Or
     const acp = JSON.parse(readFileSync(paths.orcaAcpTokenPath, 'utf8')) as { refresh_token: string }
     assert.equal(acp.refresh_token, 'rt-new')
     assert.equal(existsSync(path.join(paths.orcaChatDir, 'jetski-standalone-oauth-token')), true)
+    assert.equal(existsSync(path.join(paths.orcaAcpDir, '.token_timestamp')), true)
+    assert.equal(existsSync(path.join(paths.geminiDir, '.token_timestamp')), true)
 
     const readBack = await readCurrentAgyLogin(paths, 'other' as NodeJS.Platform)
     assert.equal(readBack?.email, 'new@gmail.com')

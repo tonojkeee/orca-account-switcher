@@ -29,7 +29,8 @@ function cloudCodeUserAgent(platform: PlatformKind = process.platform): string {
   return `antigravity/2.25.0 ${osPart}/${archPart} google-api-nodejs-client/10.3.0`
 }
 
-type MergedAgyAccount = {
+export type MergedAgyAccount = {
+  id?: string
   email: string
   name: string
   source: AgyAccountSource
@@ -43,7 +44,7 @@ export function readActiveGeminiEmail(paths: PlatformPaths): string | null {
   return asString(obj?.active)
 }
 
-function loadAgyToolsAccounts(agyAccountsDir: string): MergedAgyAccount[] {
+export function loadAgyToolsAccounts(agyAccountsDir: string): MergedAgyAccount[] {
   if (!existsSync(agyAccountsDir)) return []
   const files = readdirSync(agyAccountsDir).filter((name) => name.endsWith('.json')).sort()
   const out: MergedAgyAccount[] = []
@@ -55,7 +56,9 @@ function loadAgyToolsAccounts(agyAccountsDir: string): MergedAgyAccount[] {
     const refreshToken = asString(tok?.refresh_token)
     if (!email || !refreshToken) continue
     const expirySec = asNumber(tok?.expiry_timestamp) ?? 0
+    const id = asString(obj.id) ?? file.replace(/\.json$/, '')
     out.push({
+      id,
       email,
       name: asString(obj.name) ?? '',
       source: 'agy-tools',
@@ -88,6 +91,7 @@ export function mergeAgySources(
     if (existing) {
       byEmail.set(key, {
         ...existing,
+        id: existing.id || t.id,
         name: existing.name || t.name,
         source: 'both',
         accessToken: t.accessToken,
@@ -448,7 +452,11 @@ export async function switchAgyPoolAccount(
   const fetcher = options.fetcher ?? defaultFetch
   const agyToolsAccounts = loadAgyToolsAccounts(paths.agyAccountsDir)
   const stored = mergeAgySources(options.vaultAccounts ?? [], agyToolsAccounts)
-  const match = stored.find((a) => a.email.toLowerCase() === targetEmail.toLowerCase())
+  const match = stored.find(
+    (a) =>
+      a.email.toLowerCase() === targetEmail.toLowerCase() ||
+      (a.id && a.id.toLowerCase() === targetEmail.toLowerCase())
+  )
   if (!match) {
     return { ok: false, message: `Account ${targetEmail} not found in AGY Vault or ~/.antigravity_tools` }
   }

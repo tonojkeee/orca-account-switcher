@@ -16,6 +16,8 @@ export type OrcaManagedAccount = {
   needsSignIn: boolean
   buckets: QuotaBucket[]
   effectiveRemaining: number | null
+  refreshToken?: string | null
+  accessToken?: string | null
 }
 
 export type OrcaProviderState = {
