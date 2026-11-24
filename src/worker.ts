@@ -1,13 +1,15 @@
 // Orca plugin worker: polls account states, updates status bar, manages built-in OAuth vault & live switches.
 import type { OrcaWorkerApi } from 'orca/worker'
-import { fetchAgyPoolState, warmAgyTokenCache, type QuotaFetcher } from './agy-pool'
+import { clearAgyAccountTokenCache, fetchAgyPoolState, type QuotaFetcher } from './agy-pool'
+import {
+  applyAgyRemovalToSnapshot,
+  applyOrcaRemovalToSnapshot,
+  removeAgyAccountEverywhere,
+  removeOrcaAccountWithGuard
+} from './account-remove'
 import { readCurrentAgyLogin, type AgyStoredToken } from './keyring'
 import {
-  exchangeAuthorizationCode,
-  parseCallbackInput,
-  resolveImportedAgyIdentity,
   resolveOAuthClientCandidates,
-  startLoopbackOAuthFlow,
   type HttpFetcher,
   type OAuthClientConfig,
   type PendingOAuthFlow
@@ -40,10 +42,17 @@ import {
   readInstalledPluginVersion,
   runStoredUpdateCheck
 } from './update-check'
-import { listVaultAccounts, removeVaultAccount, saveVaultAccount } from './vault'
+import { listVaultAccounts, removeVaultAccount } from './vault'
+import {
+  beginGoogleOAuthSession,
+  completeGoogleOAuthManualSession,
+  importCurrentAgyLogin,
+  type OAuthHelperDeps
+} from './worker-oauth'
 import {
   DEFAULT_QUOTA_TTL_MS,
   DEFAULT_SETTINGS,
+  findLowQuotaAutoSwitchTarget,
   MIN_POLL_SECONDS,
   parseSettings,
   type PluginSettings
@@ -78,6 +87,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   let latestSnapshot: AccountsSnapshot | null = null
   let refreshInFlight: Promise<AccountsSnapshot> | null = null
   let lastAutoSwitchAt = 0
+  const recentlyDeletedEmails = new Set<string>()
   const currentVersion = deps.pluginVersion ?? readInstalledPluginVersion()
 
   async function runUpdateCheck(force = false): Promise<PluginUpdateInfo> {
@@ -173,6 +183,12 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
         runUpdateCheck(force)
       ])
 
+      if (agyPool.accounts.length > 0 && recentlyDeletedEmails.size > 0) {
+        agyPool.accounts = agyPool.accounts.filter(
+          (a) => !recentlyDeletedEmails.has(a.email.toLowerCase())
+        )
+      }
+
       const providers =
         orcaRes.cliFound && !orcaRes.error
           ? await reconcileOrcaAntigravitySelection(orcaRes.providers, agyPool.activeEmail, cliPath, runner)
@@ -204,23 +220,17 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   }
 
   async function maybeAutoSwitch(snapshot: AccountsSnapshot): Promise<AccountsSnapshot> {
-    if (!settings.autoSwitchLowQuota || !snapshot.agyPool.available) return snapshot
-    const active = snapshot.agyPool.accounts.find((a) => a.active)
-    if (!active || active.effectiveGemini === null || active.effectiveGemini >= settings.lowQuotaThreshold) {
-      return snapshot
-    }
-    const bestEmail = snapshot.agyPool.bestEmail
-    if (!bestEmail || bestEmail.toLowerCase() === active.email.toLowerCase()) return snapshot
-    const best = snapshot.agyPool.accounts.find((a) => a.email === bestEmail)
-    if (!best || best.effectiveGemini === null || best.effectiveGemini <= active.effectiveGemini) return snapshot
-    if (Date.now() - lastAutoSwitchAt < 60_000) return snapshot
+    const targetEmail = findLowQuotaAutoSwitchTarget(snapshot, settings)
+    if (!targetEmail || Date.now() - lastAutoSwitchAt < 60_000) return snapshot
     lastAutoSwitchAt = Date.now()
 
-    const switched = await performAgySwitch(bestEmail, snapshot)
+    const active = snapshot.agyPool.accounts.find((a) => a.active)
+    const best = snapshot.agyPool.accounts.find((a) => a.email === targetEmail)
+    const switched = await performAgySwitch(targetEmail, snapshot)
     if (switched.ok) {
       await safeHostCall('notifications.show', {
         title: 'Account Switcher',
-        body: `Low quota on ${active.email} (${active.effectiveGemini}%). Auto-switched to ${bestEmail} (${best.effectiveGemini}%).`
+        body: `Low quota on ${active?.email ?? 'account'} (${active?.effectiveGemini}%). Auto-switched to ${targetEmail} (${best?.effectiveGemini}%).`
       })
     }
     return switched.snapshot
@@ -299,47 +309,80 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     return performAgySwitch(bestEmail, current)
   }
 
-  async function importCurrentAgyLogin(): Promise<SwitchResult> {
-    const currentLogin = deps.readCurrentLogin
-      ? await deps.readCurrentLogin()
-      : await readCurrentAgyLogin(paths, platform)
-    if (!currentLogin) {
-      const snapshot = latestSnapshot ?? (await loadSnapshot(false))
-      return {
-        ok: false,
-        message: 'No active agy / Gemini login found on this machine. Use "+ Add Google Account" to sign in.',
-        snapshot
-      }
+  function getOAuthHelperDeps(): OAuthHelperDeps {
+    return {
+      orca,
+      paths,
+      platform,
+      fetcher: deps.fetcher,
+      getOAuthCandidates,
+      getOAuthClient,
+      readCurrentLogin: deps.readCurrentLogin,
+      performAgySwitch,
+      loadSnapshot,
+      getLatestSnapshot: () => latestSnapshot
     }
+  }
 
-    const { email, name, warmedToken } = await resolveImportedAgyIdentity(
-      currentLogin,
-      getOAuthCandidates(),
-      deps.fetcher
-    )
-
-    if (!email) {
-      const snapshot = latestSnapshot ?? (await loadSnapshot(false))
-      return {
-        ok: false,
-        message: 'Found an agy token, but could not determine its email. Use "+ Add Google Account" instead.',
-        snapshot
-      }
-    }
-
-    if (warmedToken) {
-      warmAgyTokenCache(email, currentLogin.refreshToken, warmedToken.accessToken, warmedToken.expiresIn)
-    }
-
-    const { storedInKeyring } = await saveVaultAccount(orca, {
+  async function performRemoveAgy(email: string): Promise<SwitchResult> {
+    const res = await removeAgyAccountEverywhere({
+      orca,
       email,
-      name,
-      refreshToken: currentLogin.refreshToken,
-      source: 'imported'
+      paths,
+      platform,
+      cliPath: resolveCli(),
+      runner,
+      oauthClients: getOAuthCandidates(),
+      fetcher: deps.fetcher,
+      latestSnapshot
     })
-    const snapshot = await loadSnapshot(true, true)
-    const suffix = storedInKeyring ? '' : ' (OS keyring unavailable; stored in plugin storage)'
-    return { ok: true, message: `Imported ${email} into AGY Vault${suffix}`, snapshot }
+
+    if (!res.ok) {
+      return { ok: false, message: res.message, snapshot: latestSnapshot ?? (await loadSnapshot(false)) }
+    }
+
+    recentlyDeletedEmails.add(email.toLowerCase())
+
+    if (latestSnapshot) {
+      latestSnapshot = applyAgyRemovalToSnapshot(latestSnapshot, email, res.autoSwitchedTo)
+      await orca.storage.set('lastSnapshot', latestSnapshot).catch(() => undefined)
+      await updateStatusBar(latestSnapshot)
+      orca.panels.post('accounts.updated', latestSnapshot)
+      return { ok: true, message: res.message, snapshot: latestSnapshot }
+    }
+
+    const snapshot = await loadSnapshot(false, true)
+    return { ok: true, message: res.message, snapshot }
+  }
+
+  async function performRemoveOrca(agent: OrcaAgentKind, account: string): Promise<SwitchResult> {
+    const res = await removeOrcaAccountWithGuard({
+      orca,
+      agent,
+      account,
+      cliPath: resolveCli(),
+      runner,
+      latestSnapshot,
+      paths,
+      platform,
+      oauthClients: getOAuthCandidates(),
+      fetcher: deps.fetcher
+    })
+
+    if (!res.ok) {
+      return { ok: false, message: res.message, snapshot: latestSnapshot ?? (await loadSnapshot(false)) }
+    }
+
+    if (latestSnapshot) {
+      latestSnapshot = applyOrcaRemovalToSnapshot(latestSnapshot, agent, account, res.autoSwitchedTo)
+      await orca.storage.set('lastSnapshot', latestSnapshot).catch(() => undefined)
+      await updateStatusBar(latestSnapshot)
+      orca.panels.post('accounts.updated', latestSnapshot)
+      return { ok: true, message: res.message, snapshot: latestSnapshot }
+    }
+
+    const snapshot = await loadSnapshot(false, true)
+    return { ok: true, message: res.message, snapshot }
   }
 
   function resetPollTimer(): void {
@@ -431,10 +474,13 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   orca.panels.handle('accounts.selectOrca', async ({ agent, account }) => performOrcaSelect(agent, account))
   orca.panels.handle('accounts.selectAgyPool', async ({ email }) => performAgySwitch(email))
   orca.panels.handle('accounts.switchBestAgy', async () => performSwitchBest())
-  orca.panels.handle('accounts.importCurrentAgy', async () => importCurrentAgyLogin())
+  orca.panels.handle('accounts.importCurrentAgy', async () => importCurrentAgyLogin(getOAuthHelperDeps()))
 
+  orca.panels.handle('accounts.removeAgyAccount', async ({ email }) => performRemoveAgy(email))
+  orca.panels.handle('accounts.removeOrcaAccount', async ({ agent, account }) => performRemoveOrca(agent, account))
   orca.panels.handle('accounts.removeVaultAccount', async ({ email }) => {
     const removed = await removeVaultAccount(orca, email)
+    clearAgyAccountTokenCache(email)
     const snapshot = await loadSnapshot(true, true)
     return {
       ok: removed,
@@ -444,62 +490,23 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   })
 
   orca.panels.handle('accounts.beginGoogleOAuth', async () => {
-    const client = getOAuthClient()
-    if (!client) {
-      throw Object.assign(
-        new Error('Google OAuth Client ID/Secret not found. Sign into Orca Chat once, install agy CLI, or set custom OAuth credentials in Settings.'),
-        { code: 'unavailable' }
-      )
-    }
-    activeOAuthFlow?.close()
-    activeOAuthFlow = await startLoopbackOAuthFlow(
-      client,
-      async (outcome) => {
-        activeOAuthFlow = null
-        if (!outcome.ok) {
-          const snapshot = latestSnapshot ?? (await loadSnapshot(false))
-          orca.panels.post('oauth.completed', { ok: false, message: outcome.error, snapshot })
-          return
-        }
-        await saveVaultAccount(orca, {
-          email: outcome.account.email,
-          name: outcome.account.name,
-          refreshToken: outcome.account.refreshToken,
-          source: 'oauth'
-        })
-        const switched = await performAgySwitch(outcome.account.email)
-        orca.panels.post('oauth.completed', {
-          ok: switched.ok,
-          message: `Connected & activated ${outcome.account.email}`,
-          snapshot: switched.snapshot
-        })
-      },
-      deps.fetcher
+    const { flow, startResult } = await beginGoogleOAuthSession(
+      getOAuthHelperDeps(),
+      activeOAuthFlow,
+      (f) => {
+        activeOAuthFlow = f
+      }
     )
-    return { authUrl: activeOAuthFlow.authUrl, redirectUri: activeOAuthFlow.redirectUri }
+    activeOAuthFlow = flow
+    return startResult
   })
 
   orca.panels.handle('accounts.completeGoogleOAuthManual', async ({ callbackOrCode }) => {
-    const flow = activeOAuthFlow
-    if (!flow) {
-      const snapshot = await loadSnapshot(false)
-      return { ok: false, message: 'No active Google sign-in session. Click "+ Add Google Account" first.', snapshot }
+    const res = await completeGoogleOAuthManualSession(getOAuthHelperDeps(), activeOAuthFlow, callbackOrCode)
+    if (res.ok) {
+      activeOAuthFlow = null
     }
-    const { code } = parseCallbackInput(callbackOrCode, flow.state)
-    const account = await exchangeAuthorizationCode(
-      { client: flow.client, code, redirectUri: flow.redirectUri, codeVerifier: flow.codeVerifier },
-      deps.fetcher
-    )
-    flow.close()
-    activeOAuthFlow = null
-    await saveVaultAccount(orca, {
-      email: account.email,
-      name: account.name,
-      refreshToken: account.refreshToken,
-      source: 'oauth'
-    })
-    const switched = await performAgySwitch(account.email)
-    return { ok: switched.ok, message: `Connected & activated ${account.email}`, snapshot: switched.snapshot }
+    return res
   })
 
   orca.panels.handle('accounts.cancelGoogleOAuth', async () => {

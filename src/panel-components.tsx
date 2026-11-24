@@ -36,257 +36,63 @@ export function toneForQuota(pct: number | null): Tone {
   return 'danger'
 }
 
-function sourceBadgeLabel(source: AgyPoolAccount['source']): string {
+export function sourceBadgeLabel(source: AgyPoolAccount['source']): string {
   if (source === 'both') return 'Vault + Tools'
   if (source === 'vault') return 'Vault'
   return 'AGY Tools'
 }
 
-export function QuotaBar({
-  label,
-  value,
-  resetsAt
+export function ActiveSpotlightStrip({
+  activeAgy,
+  activeOrcaAg,
+  spotlightEffPct,
+  hasArgon,
+  argonPct
 }: {
-  label: string
-  value: number
-  resetsAt?: number | null
+  activeAgy?: AgyPoolAccount | null
+  activeOrcaAg?: OrcaManagedAccount | null
+  spotlightEffPct: number | null
+  hasArgon: boolean
+  argonPct: number | null
 }) {
-  const hasFutureReset = typeof resetsAt === 'number' && resetsAt > Date.now()
-  return (
-    <Stack gap="xs">
-      <Row justify="between" align="center" gap="xs">
-        <Text size="xs" muted truncate>
-          {label}
-        </Text>
-        <Row gap="xs" align="center">
-          {hasFutureReset ? (
-            <Text size="xs" muted>
-              in <RelativeTime at={resetsAt} format="duration" />
+  if (activeAgy) {
+    return (
+      <Box padding="sm" background="card" border="accent" radius="md">
+        <Row justify="between" align="center" gap="xs" wrap>
+          <Row gap="xs" align="center" wrap>
+            <Text size="sm" weight="semibold" truncate>
+              {activeAgy.name ? `${activeAgy.name} (${activeAgy.email})` : activeAgy.email}
             </Text>
-          ) : null}
-          <Badge tone={toneForQuota(value)}>{`${value}%`}</Badge>
-        </Row>
-      </Row>
-      <Progress label={label} labelHidden value={value} />
-    </Stack>
-  )
-}
-
-export function OrcaAccountRow({
-  agent,
-  account,
-  busyKey,
-  onSelect
-}: {
-  agent: OrcaAgentKind
-  account: OrcaManagedAccount
-  busyKey: string | null
-  onSelect: (key: string, agent: OrcaAgentKind, accountId: string) => void
-}) {
-  const key = `orca:${agent}:${account.id}`
-  return (
-    <Box padding="sm" border={account.active ? 'accent' : true} radius="md" background={account.active ? 'card' : 'none'}>
-      <Stack gap="sm">
-        <Row justify="between" align="center" gap="xs">
-          <Stack gap="none">
-            <Row gap="xs" align="center" wrap>
-              <Text size="sm" weight="semibold" truncate>
-                {account.label}
-              </Text>
-              {account.active ? <Badge tone="success">Active</Badge> : null}
-              {account.needsSignIn ? <Badge tone="warning">Re-auth</Badge> : null}
-            </Row>
-            {account.email && account.email !== account.label ? (
-              <Text size="xs" muted truncate>
-                {account.email}
-              </Text>
+            <Badge tone="success">Active</Badge>
+            {spotlightEffPct !== null ? (
+              <Badge tone={toneForQuota(spotlightEffPct)}>{`${spotlightEffPct}%`}</Badge>
             ) : null}
-          </Stack>
-          <Button
-            size="xs"
-            variant={account.active ? 'ghost' : 'solid'}
-            tone={account.active ? 'neutral' : 'accent'}
-            disabled={account.active || busyKey !== null}
-            onPress={() => onSelect(key, agent, account.id)}
-          >
-            {busyKey === key ? 'Switching…' : account.active ? 'Current' : 'Use'}
-          </Button>
-        </Row>
-        {account.buckets.length > 0 ? (
-          <Stack gap="xs">
-            {account.buckets.slice(0, 8).map((bucket) => (
-              <QuotaBar
-                key={bucket.label}
-                label={bucket.label}
-                value={bucket.remainingPercent}
-                resetsAt={bucket.resetsAt}
-              />
-            ))}
-          </Stack>
-        ) : null}
-      </Stack>
-    </Box>
-  )
-}
-
-export function ProviderSection({
-  provider,
-  busyKey,
-  onSelect
-}: {
-  provider: OrcaProviderState
-  busyKey: string | null
-  onSelect: (key: string, agent: OrcaAgentKind, accountId: string) => void
-}) {
-  const activeCount = provider.accounts.length
-  const usingSystem = provider.supportsSystemDefault && provider.activeAccountId === null
-  const sysKey = `orca:${provider.agent}:system`
-
-  return (
-    <Card
-      title={provider.title}
-      description={
-        activeCount === 0
-          ? provider.supportsSystemDefault
-            ? `No managed accounts (${provider.systemDefaultLabel ?? 'system default'})`
-            : 'No managed accounts saved in Orca'
-          : `${activeCount} saved account${activeCount === 1 ? '' : 's'}`
-      }
-    >
-      <Stack gap="sm">
-        {provider.supportsSystemDefault ? (
-          <Row justify="between" align="center" gap="xs">
-            <Row gap="xs" align="center">
-              <Text size="xs" muted>
-                System default{provider.systemDefaultLabel ? ` · ${provider.systemDefaultLabel}` : ''}
-              </Text>
-              {usingSystem ? <Badge tone="success">Active</Badge> : null}
-            </Row>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={usingSystem || busyKey !== null}
-              onPress={() => onSelect(sysKey, provider.agent, 'system')}
-            >
-              {busyKey === sysKey ? 'Switching…' : 'Use system'}
-            </Button>
-          </Row>
-        ) : null}
-        {provider.accounts.map((acc) => (
-          <OrcaAccountRow
-            key={acc.id}
-            agent={provider.agent}
-            account={acc}
-            busyKey={busyKey}
-            onSelect={onSelect}
-          />
-        ))}
-      </Stack>
-    </Card>
-  )
-}
-
-export function AgyPoolRow({
-  account,
-  isBest,
-  busyKey,
-  onSwitch,
-  onRemove
-}: {
-  account: AgyPoolAccount
-  isBest: boolean
-  busyKey: string | null
-  onSwitch: (key: string, email: string) => void
-  onRemove: (key: string, email: string) => void
-}) {
-  const key = `agy:${account.email}`
-  const delKey = `agy-rm:${account.email}`
-  const removable = account.source === 'vault' || account.source === 'both'
-
-  return (
-    <Box padding="sm" border={account.active ? 'accent' : true} radius="md" background={account.active ? 'card' : 'none'}>
-      <Stack gap="sm">
-        <Row justify="between" align="center" gap="xs">
-          <Stack gap="none">
-            <Row gap="xs" align="center" wrap>
-              <Text size="sm" weight="semibold" truncate>
-                {account.email}
-              </Text>
-              {account.active ? <Badge tone="success">Active</Badge> : null}
-              {isBest ? <Badge tone="accent">Best</Badge> : null}
-              <Badge tone="neutral">{sourceBadgeLabel(account.source)}</Badge>
-            </Row>
-            {account.name ? (
-              <Text size="xs" muted truncate>
-                {account.name}
-              </Text>
+            {hasArgon && argonPct !== null ? (
+              <Badge tone={toneForQuota(argonPct)}>{`Argon ${argonPct}%`}</Badge>
             ) : null}
-          </Stack>
-          <Row gap="xs" align="center">
-            {removable ? (
-              <IconButton
-                icon="delete"
-                label={`Remove ${account.email} from vault`}
-                variant="ghost"
-                tone="danger"
-                size="xs"
-                disabled={busyKey !== null}
-                onPress={() => onRemove(delKey, account.email)}
-              />
-            ) : null}
-            <Button
-              size="xs"
-              variant={account.active ? 'ghost' : 'solid'}
-              tone={account.active ? 'neutral' : 'accent'}
-              disabled={account.active || busyKey !== null}
-              onPress={() => onSwitch(key, account.email)}
-            >
-              {busyKey === key ? 'Switching…' : account.active ? 'Current' : 'Switch'}
-            </Button>
           </Row>
         </Row>
-        {account.error ? (
-          <Text size="xs" tone="danger">
-            {account.error}
-          </Text>
-        ) : (
-          <Stack gap="xs">
-            {account.gemini5h !== null ? (
-              <QuotaBar
-                label="Gemini 5h"
-                value={Math.round(account.gemini5h)}
-                resetsAt={account.gemini5hResetsAt}
-              />
+      </Box>
+    )
+  }
+  if (activeOrcaAg) {
+    return (
+      <Box padding="sm" background="card" border="accent" radius="md">
+        <Row justify="between" align="center" gap="xs" wrap>
+          <Row gap="xs" align="center" wrap>
+            <Text size="sm" weight="semibold" truncate>
+              {activeOrcaAg.label}
+            </Text>
+            <Badge tone="success">Active</Badge>
+            {spotlightEffPct !== null ? (
+              <Badge tone={toneForQuota(spotlightEffPct)}>{`${spotlightEffPct}%`}</Badge>
             ) : null}
-            {account.geminiWeekly !== null ? (
-              <QuotaBar
-                label="Gemini Weekly"
-                value={Math.round(account.geminiWeekly)}
-                resetsAt={account.geminiWeeklyResetsAt}
-              />
-            ) : null}
-            {account.argonWeekly !== null && account.argonWeekly !== undefined ? (
-              <QuotaBar
-                label="Argon Weekly"
-                value={Math.round(account.argonWeekly)}
-                resetsAt={account.argonWeeklyResetsAt}
-              />
-            ) : null}
-            {account.argon5h !== null && account.argon5h !== undefined ? (
-              <QuotaBar
-                label="Argon 5h"
-                value={Math.round(account.argon5h)}
-                resetsAt={account.argon5hResetsAt}
-              />
-            ) : null}
-            {account.claudeWeekly !== null ? (
-              <QuotaBar label="Claude / GPT Weekly" value={Math.round(account.claudeWeekly)} />
-            ) : null}
-          </Stack>
-        )}
-      </Stack>
-    </Box>
-  )
+          </Row>
+        </Row>
+      </Box>
+    )
+  }
+  return null
 }
 
 export function OAuthConnectCard({
@@ -444,7 +250,11 @@ export function DiagnosticsSection({
     : 'unknown'
 
   return (
-    <Collapsible title="Runtime diagnostics" description="Detected CLIs, OAuth client source, and version">
+    <Collapsible
+      title="Runtime diagnostics"
+      description="Detected CLIs, OAuth client source, and version"
+      defaultOpen={false}
+    >
       <Stack gap="sm">
         <KeyValue
           label="Environment diagnostics"

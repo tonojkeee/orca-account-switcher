@@ -169,7 +169,7 @@ test('panel renders Orca accounts + AGY Vault, update banner, diagnostics, and f
   await view.press({ text: /Update to v0\.2\.5/ })
   assert.ok(view.find({ text: /Plugin updated cleanly!/ }))
 
-  await view.press({ text: 'Best' })
+  await view.press({ text: /Best/ })
   assert.ok(view.find({ text: /Switched agy CLI \+ Orca ACP to two@gmail\.com/ }))
 
   // Switch to AGY Vault tab and test live search filter across >3 accounts
@@ -177,12 +177,12 @@ test('panel renders Orca accounts + AGY Vault, update banner, diagnostics, and f
   const filterInput = view.find({ label: 'Filter AGY accounts' })
   assert.ok(filterInput)
   assert.ok(view.find({ text: 'three@gmail.com' }))
-  assert.ok(view.find({ text: 'Argon Weekly' }))
+  assert.ok(view.find({ text: 'Argon Wk' }))
   assert.ok(view.find({ text: '7%' }))
   await view.type({ label: 'Filter AGY accounts' }, 'three')
   assert.ok(view.find({ text: 'three@gmail.com' }))
   assert.equal(view.find({ text: 'four@gmail.com' }), null)
-  assert.equal(view.find({ text: 'Argon Weekly' }), null)
+  assert.equal(view.find({ text: 'Argon Wk' }), null)
 
   await view.post('accounts.updated', makeSnapshot('ag-1'))
   assert.deepEqual(view.errors, [])

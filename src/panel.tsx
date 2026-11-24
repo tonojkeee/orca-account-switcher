@@ -1,6 +1,8 @@
-// Declarative Orca sidebar panel: switches Orca managed agents, `agy` CLI, and built-in OAuth Vault on the fly.
+// Declarative Orca sidebar panel (v0.3.0): scan-first, zero-clutter account switcher for Orca + agy CLI + Google Vault.
 import {
   atom,
+  Badge,
+  Box,
   Button,
   Callout,
   EmptyState,
@@ -18,18 +20,20 @@ import {
   Tab,
   Tabs,
   Text,
+  Toolbar,
   type PanelContext,
   type Tone
 } from 'orca'
 import {
+  ActiveSpotlightStrip,
   AgyEmptyState,
-  AgyPoolRow,
   DiagnosticsSection,
   LaunchLockBanner,
   OAuthConnectCard,
-  ProviderSection,
+  toneForQuota,
   UpdateBanner
 } from './panel-components'
+import { AgyAccountCard, ProviderSectionFlat } from './panel-cards'
 import type { AccountsSnapshot, OAuthStartResult, SwitchResult } from './protocol'
 
 const snapshotAtom = atom<AccountsSnapshot | null>(null)
@@ -38,10 +42,12 @@ const feedbackAtom = atom<{ tone: Tone; text: string } | null>(null)
 const activeTabAtom = atom('activeTab', 'orca', { persist: 'plugin' })
 const oauthPendingAtom = atom<OAuthStartResult | null>(null)
 const manualCallbackAtom = atom('')
-const agyFilterAtom = atom('')
+const searchQueryAtom = atom('')
+const confirmDeleteAtom = atom<{ tab: 'orca' | 'agy'; id: string } | null>(null)
 
 async function refreshAccounts(): Promise<void> {
   if (read(busyKeyAtom) !== null) return
+  set(confirmDeleteAtom, null)
   set(busyKeyAtom, 'refresh')
   try {
     const snap = await plugin.request('accounts.snapshot', { refreshQuotas: true, force: true })
@@ -58,6 +64,7 @@ async function refreshAccounts(): Promise<void> {
 
 async function runAction(key: string, action: () => Promise<SwitchResult>): Promise<void> {
   if (read(busyKeyAtom) !== null) return
+  set(confirmDeleteAtom, null)
   set(busyKeyAtom, key)
   set(feedbackAtom, null)
   try {
@@ -76,6 +83,7 @@ async function runAction(key: string, action: () => Promise<SwitchResult>): Prom
 
 async function startOAuthFlow(): Promise<void> {
   if (read(busyKeyAtom) !== null) return
+  set(confirmDeleteAtom, null)
   set(busyKeyAtom, 'oauth-start')
   set(feedbackAtom, null)
   try {
@@ -126,6 +134,7 @@ async function cancelOAuthFlow(): Promise<void> {
 
 async function applyPluginUpdate(): Promise<void> {
   if (read(busyKeyAtom) !== null) return
+  set(confirmDeleteAtom, null)
   set(busyKeyAtom, 'update-apply')
   set(feedbackAtom, { tone: 'neutral', text: 'Updating plugin via Orca CLI…' })
   try {
@@ -133,7 +142,6 @@ async function applyPluginUpdate(): Promise<void> {
     set(snapshotAtom, res.snapshot)
     set(feedbackAtom, { tone: res.ok ? 'success' : 'warning', text: res.message })
   } catch (error) {
-    // Orca may restart the plugin worker mid-call while replacing the installed version.
     await new Promise((r) => setTimeout(r, 900))
     try {
       const fresh = await plugin.request('accounts.snapshot', { refreshQuotas: false })
@@ -183,7 +191,8 @@ export default function Panel() {
   const tab = read(activeTabAtom)
   const oauth = read(oauthPendingAtom)
   const manualCallback = read(manualCallbackAtom)
-  const agyFilter = read(agyFilterAtom)
+  const searchQuery = read(searchQueryAtom)
+  const confirmDelete = read(confirmDeleteAtom)
 
   if (!snap) {
     return (
@@ -196,29 +205,68 @@ export default function Panel() {
     )
   }
 
-  const configuredProviders = snap.providers.filter((p) => p.accounts.length > 0 || p.systemDefaultLabel !== null)
-  const emptyProviders = snap.providers.filter((p) => p.accounts.length === 0 && p.systemDefaultLabel === null)
-  const filterQuery = agyFilter.trim().toLowerCase()
-  const filteredAgyAccounts = filterQuery
+  const configuredProviders = snap.providers.filter(
+    (p) => p.accounts.length > 0 || p.systemDefaultLabel !== null
+  )
+  const emptyProviders = snap.providers.filter(
+    (p) => p.accounts.length === 0 && p.systemDefaultLabel === null
+  )
+
+  const orcaCount = snap.providers.reduce((n, p) => n + p.accounts.length, 0)
+  const agyCount = snap.agyPool.accounts.length
+  const totalCount = orcaCount + agyCount
+
+  // Best quota calculation
+  const bestAcc = snap.agyPool.accounts.find((a) => a.email === snap.agyPool.bestEmail)
+  const bestPct =
+    bestAcc?.effectiveGemini !== null && bestAcc?.effectiveGemini !== undefined
+      ? Math.round(bestAcc.effectiveGemini)
+      : null
+  const bestButtonText = bestPct !== null ? `Best · ${bestPct}%` : 'Best'
+  const bestAvailable =
+    snap.agyPool.available ||
+    (snap.providers.find((p) => p.agent === 'antigravity')?.accounts.length ?? 0) > 1
+
+  // Active Spotlight
+  const activeAgy = snap.agyPool.accounts.find((a) => a.active)
+  const activeOrcaAg = snap.providers
+    .find((p) => p.agent === 'antigravity')
+    ?.accounts.find((a) => a.active)
+
+  const spotlightEffPct =
+    activeAgy && activeAgy.effectiveGemini !== null && activeAgy.effectiveGemini !== undefined
+      ? Math.round(activeAgy.effectiveGemini)
+      : activeOrcaAg?.effectiveRemaining !== null && activeOrcaAg?.effectiveRemaining !== undefined
+        ? Math.round(activeOrcaAg.effectiveRemaining)
+        : null
+
+  const hasArgon = activeAgy && activeAgy.argonWeekly !== null && activeAgy.argonWeekly !== undefined
+  const argonPct = hasArgon ? Math.round(activeAgy.argonWeekly!) : null
+
+  // Universal query filtering
+  const query = searchQuery.trim().toLowerCase()
+  const filteredAgyAccounts = query
     ? snap.agyPool.accounts.filter(
-        (acc) => acc.email.toLowerCase().includes(filterQuery) || acc.name.toLowerCase().includes(filterQuery)
+        (acc) =>
+          acc.email.toLowerCase().includes(query) || acc.name.toLowerCase().includes(query)
       )
     : snap.agyPool.accounts
 
+  const antigravityProvider = snap.providers.find((p) => p.agent === 'antigravity')
+  const totalAntigravityCount = antigravityProvider?.accounts.length ?? 0
+
   return (
     <Stack gap="md">
+      {/* 1. Header with negative-time fix & Toolbar */}
       <Row justify="between" align="center" gap="xs">
         <Stack gap="none">
           <Heading level={2}>Accounts</Heading>
-          <Row gap="xs" align="center">
-            <Text size="xs" muted>
-              Updated
-            </Text>
-            <RelativeTime at={snap.fetchedAt} format="short" muted />
-          </Row>
+          <Text size="xs" muted>
+            Updated <RelativeTime at={Math.min(snap.fetchedAt, Date.now())} format="short" /> · {totalCount} accounts
+          </Text>
         </Stack>
-        <Row gap="xs" align="center">
-          {snap.agyPool.available || (snap.providers.find((p) => p.agent === 'antigravity')?.accounts.length ?? 0) > 1 ? (
+        <Toolbar label="Header actions" gap="xs">
+          {bestAvailable ? (
             <Button
               size="xs"
               variant="outline"
@@ -228,7 +276,7 @@ export default function Panel() {
               disabled={busyKey !== null}
               onPress={() => runAction('best', () => plugin.request('accounts.switchBestAgy'))}
             >
-              {busyKey === 'best' ? 'Switching…' : 'Best'}
+              {busyKey === 'best' ? 'Switching…' : bestButtonText}
             </Button>
           ) : null}
           <IconButton
@@ -239,8 +287,17 @@ export default function Panel() {
             disabled={busyKey !== null}
             onPress={refreshAccounts}
           />
-        </Row>
+        </Toolbar>
       </Row>
+
+      {/* 2. Active Spotlight Strip */}
+      <ActiveSpotlightStrip
+        activeAgy={activeAgy}
+        activeOrcaAg={activeOrcaAg}
+        spotlightEffPct={spotlightEffPct}
+        hasArgon={Boolean(hasArgon)}
+        argonPct={argonPct}
+      />
 
       {feedback ? (
         <Callout tone={feedback.tone} icon={feedback.tone === 'danger' ? 'warning' : 'check'}>
@@ -287,9 +344,31 @@ export default function Panel() {
         />
       ) : null}
 
-      <Tabs label="Account source" value={tab} onChange={(next) => set(activeTabAtom, next)}>
+      {/* 3. Tabs & Content */}
+      <Tabs
+        label="Account source"
+        value={tab}
+        onChange={(next) => {
+          set(confirmDeleteAtom, null)
+          set(activeTabAtom, next)
+        }}
+      >
         <Tab value="orca" label="Orca Agents" icon="agent">
           <Stack gap="sm">
+            {orcaCount > 3 ? (
+              <Input
+                label="Search accounts"
+                labelHidden
+                type="search"
+                placeholder="Search Orca accounts…"
+                value={searchQuery}
+                onChange={(v) => {
+                  set(confirmDeleteAtom, null)
+                  set(searchQueryAtom, v)
+                }}
+              />
+            ) : null}
+
             {configuredProviders.length === 0 ? (
               <EmptyState
                 icon="agent"
@@ -297,17 +376,39 @@ export default function Panel() {
                 description="Add accounts in Orca Settings > AI Provider Accounts or via `orca account add`."
               />
             ) : (
-              configuredProviders.map((provider) => (
-                <ProviderSection
-                  key={provider.agent}
-                  provider={provider}
-                  busyKey={busyKey}
-                  onSelect={(key, agent, account) =>
-                    runAction(key, () => plugin.request('accounts.selectOrca', { agent, account }))
-                  }
-                />
-              ))
+              configuredProviders.map((provider) => {
+                const provAccounts = query
+                  ? provider.accounts.filter(
+                      (a) =>
+                        a.label.toLowerCase().includes(query) ||
+                        (a.email && a.email.toLowerCase().includes(query))
+                    )
+                  : provider.accounts
+                if (query && provAccounts.length === 0) return null
+                return (
+                  <ProviderSectionFlat
+                    key={provider.agent}
+                    provider={{ ...provider, accounts: provAccounts }}
+                    busyKey={busyKey}
+                    confirmDeleteId={confirmDelete?.tab === 'orca' ? confirmDelete.id : null}
+                    isLastActiveProvider={totalAntigravityCount <= 1}
+                    onSelect={(key, agent, account) =>
+                      runAction(key, () =>
+                        plugin.request('accounts.selectOrca', { agent, account })
+                      )
+                    }
+                    onStartDelete={(id) => set(confirmDeleteAtom, { tab: 'orca', id })}
+                    onConfirmDelete={(agent, accountId) =>
+                      runAction(`orca-rm:${agent}:${accountId}`, () =>
+                        plugin.request('accounts.removeOrcaAccount', { agent, account: accountId })
+                      )
+                    }
+                    onCancelDelete={() => set(confirmDeleteAtom, null)}
+                  />
+                )
+              })
             )}
+
             {emptyProviders.length > 0 ? (
               <Text size="xs" muted>
                 Not configured: {emptyProviders.map((p) => p.title).join(', ')}
@@ -365,8 +466,11 @@ export default function Panel() {
                 labelHidden
                 type="search"
                 placeholder="Filter by email or name…"
-                value={agyFilter}
-                onChange={(v) => set(agyFilterAtom, v)}
+                value={searchQuery}
+                onChange={(v) => {
+                  set(confirmDeleteAtom, null)
+                  set(searchQueryAtom, v)
+                }}
               />
             ) : null}
 
@@ -376,32 +480,51 @@ export default function Panel() {
               <EmptyState
                 icon="search"
                 title="No matching accounts"
-                description={`No AGY account matched "${agyFilter}".`}
+                description={`No AGY account matched "${searchQuery}".`}
               />
             ) : (
-              filteredAgyAccounts.map((acc) => (
-                <AgyPoolRow
-                  key={acc.email}
-                  account={acc}
-                  isBest={snap.agyPool.bestEmail === acc.email}
-                  busyKey={busyKey}
-                  onSwitch={(key, email) => runAction(key, () => plugin.request('accounts.selectAgyPool', { email }))}
-                  onRemove={(key, email) =>
-                    runAction(key, () => plugin.request('accounts.removeVaultAccount', { email }))
-                  }
-                />
-              ))
+              filteredAgyAccounts.map((acc) => {
+                const surviving = snap.agyPool.accounts.filter(
+                  (a) => a.email.toLowerCase() !== acc.email.toLowerCase()
+                )
+                const fallback =
+                  surviving.find((a) => a.email === snap.agyPool.bestEmail) ?? surviving[0]
+
+                return (
+                  <AgyAccountCard
+                    key={acc.email}
+                    account={acc}
+                    isBest={snap.agyPool.bestEmail === acc.email}
+                    isLastActive={acc.active && snap.agyPool.accounts.length <= 1}
+                    fallbackEmail={fallback?.email ?? null}
+                    busyKey={busyKey}
+                    confirmDeleteEmail={confirmDelete?.tab === 'agy' ? confirmDelete.id : null}
+                    onSwitch={(key, email) =>
+                      runAction(key, () => plugin.request('accounts.selectAgyPool', { email }))
+                    }
+                    onStartDelete={(email) => set(confirmDeleteAtom, { tab: 'agy', id: email })}
+                    onConfirmDelete={(email) =>
+                      runAction(`agy-rm:${email}`, () =>
+                        plugin.request('accounts.removeAgyAccount', { email })
+                      )
+                    }
+                    onCancelDelete={() => set(confirmDeleteAtom, null)}
+                  />
+                )
+              })
             )}
           </Stack>
         </Tab>
       </Tabs>
 
+      {/* 4. Diagnostics in Collapsible (defaultOpen=false) */}
       <DiagnosticsSection
         snap={snap}
         busyKey={busyKey}
         onApplyUpdate={() => void applyPluginUpdate()}
         onCheckUpdate={() => {
           if (read(busyKeyAtom) !== null) return
+          set(confirmDeleteAtom, null)
           set(busyKeyAtom, 'update-check')
           void plugin
             .request('accounts.checkUpdate')

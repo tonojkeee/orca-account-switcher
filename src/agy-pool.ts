@@ -139,6 +139,15 @@ export function clearAgyTokenCache(): void {
   accessTokenCache.clear()
 }
 
+export function clearAgyAccountTokenCache(email: string): void {
+  const prefix = `${email.toLowerCase()}::`
+  for (const key of accessTokenCache.keys()) {
+    if (key.startsWith(prefix)) {
+      accessTokenCache.delete(key)
+    }
+  }
+}
+
 export function warmAgyTokenCache(
   email: string,
   refreshToken: string,

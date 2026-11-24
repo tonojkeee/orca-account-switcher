@@ -1,5 +1,10 @@
 import { assert, test } from 'orca/testing'
-import { fetchOrcaAccounts, parseOrcaAccountListJson, selectOrcaAccount } from './orca-cli'
+import {
+  fetchOrcaAccounts,
+  parseOrcaAccountListJson,
+  removeOrcaAccount,
+  selectOrcaAccount
+} from './orca-cli'
 
 const SAMPLE_LIST_JSON = JSON.stringify({
   ok: true,
@@ -88,4 +93,26 @@ test('fetchOrcaAccounts and selectOrcaAccount handle missing CLI and selection c
   })
   assert.equal(switched.ok, true)
   assert.deepEqual(selCalls, [['account', 'select', '--agent', 'claude', '--account', 'cl-2', '--json']])
+})
+
+test('removeOrcaAccount handles missing CLI, success, and error outcomes', async () => {
+  const missing = await removeOrcaAccount('antigravity', 'ag-1', null)
+  assert.equal(missing.ok, false)
+  assert.ok(missing.message.includes('not found'))
+
+  const rmCalls: string[][] = []
+  const okRm = await removeOrcaAccount('claude', 'cl-2', '/bin/orca', async (_exe, args) => {
+    rmCalls.push([...args])
+    return { code: 0, stdout: '{"ok":true}', stderr: '' }
+  })
+  assert.equal(okRm.ok, true)
+  assert.deepEqual(rmCalls, [['account', 'rm', '--agent', 'claude', '--account', 'cl-2', '--json']])
+
+  const failRm = await removeOrcaAccount('antigravity', 'ag-1', '/bin/orca', async () => ({
+    code: 1,
+    stdout: JSON.stringify({ ok: false, error: { message: 'Account is active in terminal session' } }),
+    stderr: ''
+  }))
+  assert.equal(failRm.ok, false)
+  assert.equal(failRm.message, 'Account is active in terminal session')
 })

@@ -214,6 +214,23 @@ export async function selectOrcaAccount(
   return { ok: true, message: `Switched ${agent} to ${account}` }
 }
 
+export async function removeOrcaAccount(
+  agent: OrcaAgentKind,
+  account: string,
+  cliPath: string | null = findOrcaCli(),
+  runner: CommandRunner = runCommand
+): Promise<{ ok: boolean; message: string }> {
+  if (!cliPath) {
+    return { ok: false, message: 'Orca CLI not found on this machine.' }
+  }
+  const res = await runner(cliPath, ['account', 'rm', '--agent', agent, '--account', account, '--json'], 15000)
+  if (res.code !== 0) {
+    const errMsg = extractCliError(res.stdout) ?? (res.stderr.trim() || `Failed with exit code ${res.code}`)
+    return { ok: false, message: errMsg }
+  }
+  return { ok: true, message: `Removed ${account} from ${agent}` }
+}
+
 function extractCliError(stdout: string): string | null {
   try {
     const parsed = asRecord(JSON.parse(stdout))

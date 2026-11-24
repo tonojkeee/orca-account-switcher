@@ -49,3 +49,19 @@ export function parseSettings(raw: Record<string, unknown>): PluginSettings {
     checkUpdates: raw.checkUpdates !== false
   }
 }
+
+export function findLowQuotaAutoSwitchTarget(
+  snapshot: { agyPool: { available: boolean; activeEmail: string | null; bestEmail: string | null; accounts: Array<{ email: string; active: boolean; effectiveGemini: number | null }> } },
+  settings: PluginSettings
+): string | null {
+  if (!settings.autoSwitchLowQuota || !snapshot.agyPool.available) return null
+  const active = snapshot.agyPool.accounts.find((a) => a.active)
+  if (!active || active.effectiveGemini === null || active.effectiveGemini >= settings.lowQuotaThreshold) {
+    return null
+  }
+  const bestEmail = snapshot.agyPool.bestEmail
+  if (!bestEmail || bestEmail.toLowerCase() === active.email.toLowerCase()) return null
+  const best = snapshot.agyPool.accounts.find((a) => a.email === bestEmail)
+  if (!best || best.effectiveGemini === null || best.effectiveGemini <= active.effectiveGemini) return null
+  return bestEmail
+}

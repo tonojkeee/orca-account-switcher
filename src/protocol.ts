@@ -116,6 +116,8 @@ declare module 'orca' {
     'accounts.completeGoogleOAuthManual': { input: { callbackOrCode: string }; output: SwitchResult }
     'accounts.cancelGoogleOAuth': { output: { ok: true } }
     'accounts.importCurrentAgy': { output: SwitchResult }
+    'accounts.removeAgyAccount': { input: { email: string }; output: SwitchResult }
+    'accounts.removeOrcaAccount': { input: { agent: OrcaAgentKind; account: string }; output: SwitchResult }
     'accounts.removeVaultAccount': { input: { email: string }; output: SwitchResult }
     'accounts.checkUpdate': { output: AccountsSnapshot }
     'accounts.dismissUpdate': { input: { version: string }; output: AccountsSnapshot }
