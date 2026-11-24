@@ -54,6 +54,8 @@ function makeSnapshot(activeOrcaId: string): AccountsSnapshot {
           claude5h: 100,
           claudeWeekly: 100,
           effectiveGemini: 95,
+          argonWeekly: 7,
+          argonWeeklyResetsAt: Date.now() + 86400000,
           error: null
         },
         {
@@ -175,9 +177,12 @@ test('panel renders Orca accounts + AGY Vault, update banner, diagnostics, and f
   const filterInput = view.find({ label: 'Filter AGY accounts' })
   assert.ok(filterInput)
   assert.ok(view.find({ text: 'three@gmail.com' }))
+  assert.ok(view.find({ text: 'Argon Weekly' }))
+  assert.ok(view.find({ text: '7%' }))
   await view.type({ label: 'Filter AGY accounts' }, 'three')
   assert.ok(view.find({ text: 'three@gmail.com' }))
   assert.equal(view.find({ text: 'four@gmail.com' }), null)
+  assert.equal(view.find({ text: 'Argon Weekly' }), null)
 
   await view.post('accounts.updated', makeSnapshot('ag-1'))
   assert.deepEqual(view.errors, [])

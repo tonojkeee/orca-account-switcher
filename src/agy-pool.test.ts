@@ -37,6 +37,74 @@ test('parseCloudCodeQuotaResponse computes remaining %, effectiveGemini, and res
   assert.equal(parsed.claudeWeekly, 90)
   assert.equal(parsed.gemini5hResetsAt, Date.parse('2026-11-22T15:00:00Z'))
   assert.equal(parsed.geminiWeeklyResetsAt, Date.parse('2026-11-28T00:00:00Z'))
+  assert.equal(parsed.argonWeekly, null)
+  assert.equal(parsed.argonWeeklyResetsAt, null)
+  assert.equal(parsed.argon5h, null)
+  assert.equal(parsed.argon5hResetsAt, null)
+})
+
+test('parseCloudCodeQuotaResponse parses Argon limits without overwriting standard geminiWeekly', () => {
+  const parsed = parseCloudCodeQuotaResponse({
+    groups: [
+      {
+        displayName: 'Gemini Models',
+        buckets: [
+          { window: '5h', remainingFraction: 0.9, resetTime: '2026-11-22T15:00:00Z' },
+          { window: 'weekly', remainingFraction: 0.85, resetTime: '2026-11-28T00:00:00Z' }
+        ]
+      },
+      {
+        displayName: 'Gemini 4 Argon',
+        name: 'gemini-argon-group',
+        buckets: [
+          {
+            name: 'gemini-argon-wtu-weekly',
+            window: 'weekly',
+            remainingFraction: 0.07,
+            resetTime: '2026-11-29T12:00:00Z'
+          }
+        ]
+      },
+      {
+        displayName: 'Claude and GPT models',
+        buckets: [
+          { window: '5h', remainingFraction: 1.0 },
+          { window: 'weekly', remainingFraction: 0.9 }
+        ]
+      }
+    ]
+  })
+
+  // Core invariant: geminiWeekly must NOT be overwritten by Argon (85, not 7)
+  assert.equal(parsed.gemini5h, 90)
+  assert.equal(parsed.geminiWeekly, 85)
+  assert.equal(parsed.effectiveGemini, 85)
+  assert.equal(parsed.geminiWeeklyResetsAt, Date.parse('2026-11-28T00:00:00Z'))
+
+  // Argon weekly parsed accurately
+  assert.equal(parsed.argonWeekly, 7)
+  assert.equal(parsed.argonWeeklyResetsAt, Date.parse('2026-11-29T12:00:00Z'))
+  assert.equal(parsed.argon5h, null)
+  assert.equal(parsed.argon5hResetsAt, null)
+})
+
+test('parseCloudCodeQuotaResponse returns null for argonWeekly when Argon is not present', () => {
+  const parsed = parseCloudCodeQuotaResponse({
+    groups: [
+      {
+        displayName: 'Gemini Models',
+        buckets: [
+          { window: '5h', remainingFraction: 1.0 },
+          { window: 'weekly', remainingFraction: 0.5 }
+        ]
+      }
+    ]
+  })
+  assert.equal(parsed.geminiWeekly, 50)
+  assert.equal(parsed.argonWeekly, null)
+  assert.equal(parsed.argonWeeklyResetsAt, null)
+  assert.equal(parsed.argon5h, null)
+  assert.equal(parsed.argon5hResetsAt, null)
 })
 
 test('fetchAgyPoolState and switchAgyPoolAccount merge Vault + AGY Tools and switch agy CLI without external managers', async () => {

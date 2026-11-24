@@ -64,7 +64,7 @@ export function QuotaBar({
               in <RelativeTime at={resetsAt} format="duration" />
             </Text>
           ) : null}
-          <Badge tone={toneForQuota(value)}>{value}%</Badge>
+          <Badge tone={toneForQuota(value)}>{`${value}%`}</Badge>
         </Row>
       </Row>
       <Progress label={label} labelHidden value={value} />
@@ -263,6 +263,20 @@ export function AgyPoolRow({
                 label="Gemini Weekly"
                 value={Math.round(account.geminiWeekly)}
                 resetsAt={account.geminiWeeklyResetsAt}
+              />
+            ) : null}
+            {account.argonWeekly !== null && account.argonWeekly !== undefined ? (
+              <QuotaBar
+                label="Argon Weekly"
+                value={Math.round(account.argonWeekly)}
+                resetsAt={account.argonWeeklyResetsAt}
+              />
+            ) : null}
+            {account.argon5h !== null && account.argon5h !== undefined ? (
+              <QuotaBar
+                label="Argon 5h"
+                value={Math.round(account.argon5h)}
+                resetsAt={account.argon5hResetsAt}
               />
             ) : null}
             {account.claudeWeekly !== null ? (

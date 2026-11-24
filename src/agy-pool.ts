@@ -208,6 +208,10 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
   effectiveGemini: number
   gemini5hResetsAt: number | null
   geminiWeeklyResetsAt: number | null
+  argon5h?: number | null
+  argonWeekly?: number | null
+  argon5hResetsAt?: number | null
+  argonWeeklyResetsAt?: number | null
 } {
   let gemini5h = 100
   let geminiWeekly = 100
@@ -215,6 +219,10 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
   let claudeWeekly = 100
   let gemini5hResetsAt: number | null = null
   let geminiWeeklyResetsAt: number | null = null
+  let argon5h: number | null = null
+  let argonWeekly: number | null = null
+  let argon5hResetsAt: number | null = null
+  let argonWeeklyResetsAt: number | null = null
 
   const root = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   const groups = Array.isArray(root.groups) ? root.groups : []
@@ -223,6 +231,9 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
     if (!g || typeof g !== 'object') continue
     const group = g as Record<string, unknown>
     const displayName = asString(group.displayName) ?? ''
+    const isArgon =
+      displayName.toLowerCase().includes('argon') ||
+      (group.name !== undefined && group.name !== null && String(group.name).toLowerCase().includes('argon'))
     const buckets = Array.isArray(group.buckets) ? group.buckets : []
     for (const b of buckets) {
       if (!b || typeof b !== 'object') continue
@@ -232,7 +243,19 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
       const pct = Math.max(0, Math.min(100, frac * 100))
       const win = asString(bucket.window)
       const resetsAt = asTimestampMs(bucket.resetTime ?? bucket.resetsAt)
-      if (displayName.includes('Gemini')) {
+      const isBucketArgon =
+        isArgon ||
+        (bucket.name !== undefined && bucket.name !== null && String(bucket.name).toLowerCase().includes('argon'))
+
+      if (isBucketArgon) {
+        if (win === '5h') {
+          argon5h = pct
+          argon5hResetsAt = resetsAt
+        } else if (win === 'weekly') {
+          argonWeekly = pct
+          argonWeeklyResetsAt = resetsAt
+        }
+      } else if (displayName.includes('Gemini')) {
         if (win === '5h') {
           gemini5h = pct
           gemini5hResetsAt = resetsAt
@@ -254,7 +277,11 @@ export function parseCloudCodeQuotaResponse(raw: unknown): {
     claudeWeekly: round1(claudeWeekly),
     effectiveGemini: round1(Math.min(gemini5h, geminiWeekly)),
     gemini5hResetsAt,
-    geminiWeeklyResetsAt
+    geminiWeeklyResetsAt,
+    argon5h: argon5h !== null ? round1(argon5h) : null,
+    argonWeekly: argonWeekly !== null ? round1(argonWeekly) : null,
+    argon5hResetsAt,
+    argonWeeklyResetsAt
   }
 }
 
@@ -280,6 +307,10 @@ function emptyPoolAccount(
     effectiveGemini: null,
     gemini5hResetsAt: null,
     geminiWeeklyResetsAt: null,
+    argon5h: null,
+    argonWeekly: null,
+    argon5hResetsAt: null,
+    argonWeeklyResetsAt: null,
     error
   }
 }

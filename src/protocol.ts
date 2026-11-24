@@ -44,6 +44,10 @@ export type AgyPoolAccount = {
   effectiveGemini: number | null
   gemini5hResetsAt?: number | null
   geminiWeeklyResetsAt?: number | null
+  argon5h?: number | null
+  argonWeekly?: number | null
+  argon5hResetsAt?: number | null
+  argonWeeklyResetsAt?: number | null
   error: string | null
 }
 
