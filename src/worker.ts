@@ -50,6 +50,7 @@ import {
   type OAuthHelperDeps
 } from './worker-oauth'
 import {
+  buildDiagnostics,
   DEFAULT_QUOTA_TTL_MS,
   DEFAULT_SETTINGS,
   findLowQuotaAutoSwitchTarget,
@@ -87,7 +88,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   let latestSnapshot: AccountsSnapshot | null = null
   let refreshInFlight: Promise<AccountsSnapshot> | null = null
   let lastAutoSwitchAt = 0
-  const recentlyDeletedEmails = new Set<string>()
+  const recentlyDeletedEmails = new Map<string, number>()
   const currentVersion = deps.pluginVersion ?? readInstalledPluginVersion()
 
   async function runUpdateCheck(force = false): Promise<PluginUpdateInfo> {
@@ -119,14 +120,8 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
     return getOAuthCandidates()[0] ?? null
   }
 
-  function collectDiagnostics(oauthClient: OAuthClientConfig | null = getOAuthClient()) {
-    return {
-      orcaCliPath: resolveCli(),
-      agyCliPath: resolveAgyBin(),
-      agyToolsCliPath: findAgyToolsCli(platform),
-      oauthClientSource: oauthClient?.source ?? (oauthClient ? 'resolved' : null)
-    }
-  }
+  const collectDiagnostics = (oauthClient = getOAuthClient()) =>
+    buildDiagnostics(resolveCli(), resolveAgyBin(), findAgyToolsCli(platform), oauthClient)
 
   async function safeHostCall(method: string, params: Record<string, unknown>): Promise<void> {
     try {
@@ -157,6 +152,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       await refreshInFlight.catch(() => undefined)
     }
     refreshInFlight = (async () => {
+      const refreshStartedAt = Date.now()
       const cliPath = resolveCli()
       const oauthClients = getOAuthCandidates()
       const oauthClient = oauthClients[0] ?? null
@@ -184,9 +180,16 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       ])
 
       if (agyPool.accounts.length > 0 && recentlyDeletedEmails.size > 0) {
-        agyPool.accounts = agyPool.accounts.filter(
-          (a) => !recentlyDeletedEmails.has(a.email.toLowerCase())
-        )
+        const now = Date.now()
+        for (const [delEmail, deletedAt] of recentlyDeletedEmails.entries()) {
+          if (now - deletedAt > 60_000) {
+            recentlyDeletedEmails.delete(delEmail)
+          }
+        }
+        agyPool.accounts = agyPool.accounts.filter((a) => {
+          const deletedAt = recentlyDeletedEmails.get(a.email.toLowerCase())
+          return deletedAt === undefined || deletedAt < refreshStartedAt
+        })
       }
 
       const providers =
@@ -266,6 +269,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   }
 
   async function performAgySwitch(email: string, preloaded?: AccountsSnapshot): Promise<SwitchResult> {
+    recentlyDeletedEmails.delete(email.toLowerCase())
     const res = await performAgySwitchAction({
       orca,
       email,
@@ -320,7 +324,8 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       readCurrentLogin: deps.readCurrentLogin,
       performAgySwitch,
       loadSnapshot,
-      getLatestSnapshot: () => latestSnapshot
+      getLatestSnapshot: () => latestSnapshot,
+      clearRecentlyDeleted: (e) => recentlyDeletedEmails.delete(e.toLowerCase())
     }
   }
 
@@ -341,7 +346,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
       return { ok: false, message: res.message, snapshot: latestSnapshot ?? (await loadSnapshot(false)) }
     }
 
-    recentlyDeletedEmails.add(email.toLowerCase())
+    recentlyDeletedEmails.set(email.toLowerCase(), Date.now())
 
     if (latestSnapshot) {
       latestSnapshot = applyAgyRemovalToSnapshot(latestSnapshot, email, res.autoSwitchedTo)
@@ -481,6 +486,7 @@ export default function activate(orca: OrcaWorkerApi, deps: WorkerDeps = {}): vo
   orca.panels.handle('accounts.removeVaultAccount', async ({ email }) => {
     const removed = await removeVaultAccount(orca, email)
     clearAgyAccountTokenCache(email)
+    recentlyDeletedEmails.set(email.toLowerCase(), Date.now())
     const snapshot = await loadSnapshot(true, true)
     return {
       ok: removed,

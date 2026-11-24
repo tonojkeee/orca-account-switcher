@@ -25,6 +25,7 @@ export type OAuthHelperDeps = {
   performAgySwitch: (email: string) => Promise<SwitchResult>
   loadSnapshot: (refresh?: boolean, force?: boolean) => Promise<AccountsSnapshot>
   getLatestSnapshot: () => AccountsSnapshot | null
+  clearRecentlyDeleted?: (email: string) => void
 }
 
 export async function importCurrentAgyLogin(
@@ -67,6 +68,7 @@ export async function importCurrentAgyLogin(
     refreshToken: currentLogin.refreshToken,
     source: 'imported'
   })
+  deps.clearRecentlyDeleted?.(email)
   const snapshot = await deps.loadSnapshot(true, true)
   const suffix = storedInKeyring ? '' : ' (OS keyring unavailable; stored in plugin storage)'
   return { ok: true, message: `Imported ${email} into AGY Vault${suffix}`, snapshot }
@@ -103,6 +105,7 @@ export async function beginGoogleOAuthSession(
         refreshToken: outcome.account.refreshToken,
         source: 'oauth'
       })
+      deps.clearRecentlyDeleted?.(outcome.account.email)
       const switched = await deps.performAgySwitch(outcome.account.email)
       deps.orca.panels.post('oauth.completed', {
         ok: switched.ok,
@@ -139,6 +142,7 @@ export async function completeGoogleOAuthManualSession(
     refreshToken: account.refreshToken,
     source: 'oauth'
   })
+  deps.clearRecentlyDeleted?.(account.email)
   const switched = await deps.performAgySwitch(account.email)
   return { ok: switched.ok, message: `Connected & activated ${account.email}`, snapshot: switched.snapshot }
 }

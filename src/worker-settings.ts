@@ -65,3 +65,17 @@ export function findLowQuotaAutoSwitchTarget(
   if (!best || best.effectiveGemini === null || best.effectiveGemini <= active.effectiveGemini) return null
   return bestEmail
 }
+
+export function buildDiagnostics(
+  orcaCliPath: string | null,
+  agyCliPath: string | null,
+  agyToolsCliPath: string | null,
+  oauthClient?: { source?: string | null } | null
+) {
+  return {
+    orcaCliPath,
+    agyCliPath,
+    agyToolsCliPath,
+    oauthClientSource: oauthClient?.source ?? (oauthClient ? 'resolved' : null)
+  }
+}

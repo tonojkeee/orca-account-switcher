@@ -108,6 +108,18 @@ test('worker imports current agy login into encrypted vault, switches agy + Orca
     const removed = await worker.request('accounts.removeVaultAccount', { email: 'one@gmail.com' })
     assert.equal(removed.ok, true)
     assert.equal(removed.snapshot.agyPool.accounts.length, 0)
+
+    // Re-import the same account: verify it is NOT hidden by recentlyDeletedEmails
+    const reImported = await worker.request('accounts.importCurrentAgy')
+    assert.equal(reImported.ok, true)
+    assert.equal(reImported.snapshot.agyPool.accounts.length, 1)
+    assert.equal(reImported.snapshot.agyPool.accounts[0].email, 'one@gmail.com')
+
+    // Snapshot request also keeps the re-imported account visible
+    const freshSnap = await worker.request('accounts.snapshot', { refreshQuotas: false, force: true })
+    assert.equal(freshSnap.agyPool.accounts.length, 1)
+    assert.equal(freshSnap.agyPool.accounts[0].email, 'one@gmail.com')
+
     assert.deepEqual(worker.refusals, [])
 
     await worker.deactivate()
@@ -354,6 +366,87 @@ test('worker auto-reconciles Orca selectedAccountId when live agy login already 
     assert.equal(snap.orcaLaunchLock, null)
     const ag = snap.providers.find((p) => p.agent === 'antigravity')!
     assert.equal(ag.selectedAccountId, 'orca-saved-live')
+    await worker.deactivate()
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('worker does not hide re-added account after removeAgyAccount (recentlyDeletedEmails timestamp)', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-worker-readd-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+    mkdirSync(paths.agyAccountsDir, { recursive: true })
+    writeFileSync(
+      paths.orcaAcpTokenPath,
+      JSON.stringify({ client_id: 'cid', client_secret: 'csec', token_uri: 'https://oauth.test/token' })
+    )
+    writeFileSync(path.join(paths.geminiDir, 'google_accounts.json'), JSON.stringify({ active: 'primary@example.com' }))
+
+    const writeTargetProfile = () =>
+      writeFileSync(
+        path.join(paths.agyAccountsDir, 'target.json'),
+        JSON.stringify({
+          id: 'acc-target',
+          email: 'target@example.com',
+          name: 'Target',
+          token: { refresh_token: 'rt-t', access_token: 'at-t', expiry_timestamp: Math.floor(Date.now() / 1000) + 3600 }
+        })
+      )
+
+    writeFileSync(
+      path.join(paths.agyAccountsDir, 'primary.json'),
+      JSON.stringify({
+        id: 'acc-primary',
+        email: 'primary@example.com',
+        name: 'Primary',
+        token: { refresh_token: 'rt-p', access_token: 'at-p', expiry_timestamp: Math.floor(Date.now() / 1000) + 3600 }
+      })
+    )
+    writeTargetProfile()
+
+    const host = mockHost()
+
+    const worker = await mountWorker(
+      {
+        default: (orca) =>
+          main.default(orca, {
+            paths,
+            findOrca: () => null,
+            findAgy: () => null,
+            fetcher: async (url) => {
+              if (url.includes('/token')) {
+                return { ok: true, status: 200, json: async () => ({ access_token: 'at-mock', expires_in: 3600 }) }
+              }
+              return {
+                ok: true,
+                status: 200,
+                json: async () => ({ groups: [{ displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.9 }] }] })
+              }
+            }
+          }),
+        deactivate: main.deactivate
+      },
+      { host }
+    )
+
+    const initial = await worker.request('accounts.snapshot', { refreshQuotas: true, force: true })
+    assert.equal(initial.agyPool.accounts.length, 2)
+
+    const rm = await worker.request('accounts.removeAgyAccount', { email: 'target@example.com' })
+    assert.equal(rm.ok, true)
+    assert.equal(rm.snapshot.agyPool.accounts.length, 1)
+
+    // Simulate re-adding target@example.com into accounts directory
+    writeTargetProfile()
+
+    // Snapshot started after re-add must show target@example.com again
+    const postReAdd = await worker.request('accounts.snapshot', { refreshQuotas: true, force: true })
+    assert.equal(postReAdd.agyPool.accounts.length, 2)
+    assert.ok(postReAdd.agyPool.accounts.some((a) => a.email === 'target@example.com'))
+
     await worker.deactivate()
   } finally {
     rmSync(home, { recursive: true, force: true })
