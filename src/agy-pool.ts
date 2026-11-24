@@ -37,6 +37,7 @@ export type MergedAgyAccount = {
   refreshToken: string
   accessToken: string | null
   expiryMs: number
+  baselineQuota?: ReturnType<typeof parseCloudCodeQuotaResponse>
 }
 
 export function readActiveGeminiEmail(paths: PlatformPaths): string | null {
@@ -57,6 +58,8 @@ export function loadAgyToolsAccounts(agyAccountsDir: string): MergedAgyAccount[]
     if (!email || !refreshToken) continue
     const expirySec = asNumber(tok?.expiry_timestamp) ?? 0
     const id = asString(obj.id) ?? file.replace(/\.json$/, '')
+    const baselineQuota =
+      obj.quota && typeof obj.quota === 'object' ? parseCloudCodeQuotaResponse(obj.quota) : undefined
     out.push({
       id,
       email,
@@ -64,7 +67,8 @@ export function loadAgyToolsAccounts(agyAccountsDir: string): MergedAgyAccount[]
       source: 'agy-tools',
       refreshToken,
       accessToken: asString(tok?.access_token),
-      expiryMs: expirySec * 1000
+      expiryMs: expirySec * 1000,
+      baselineQuota
     })
   }
   return out
@@ -95,7 +99,8 @@ export function mergeAgySources(
         name: existing.name || t.name,
         source: 'both',
         accessToken: t.accessToken,
-        expiryMs: t.expiryMs
+        expiryMs: t.expiryMs,
+        baselineQuota: t.baselineQuota ?? existing.baselineQuota
       })
     } else {
       byEmail.set(key, t)
@@ -199,91 +204,8 @@ async function resolveAccessToken(
   return { error: 'OAuth client config not found (open Orca Chat or set Client ID/Secret in settings)' }
 }
 
-/** Parse Google Cloud Code `retrieveUserQuotaSummary` JSON response into remaining percentages. */
-export function parseCloudCodeQuotaResponse(raw: unknown): {
-  gemini5h: number
-  geminiWeekly: number
-  claude5h: number
-  claudeWeekly: number
-  effectiveGemini: number
-  gemini5hResetsAt: number | null
-  geminiWeeklyResetsAt: number | null
-  argon5h?: number | null
-  argonWeekly?: number | null
-  argon5hResetsAt?: number | null
-  argonWeeklyResetsAt?: number | null
-} {
-  let gemini5h = 100
-  let geminiWeekly = 100
-  let claude5h = 100
-  let claudeWeekly = 100
-  let gemini5hResetsAt: number | null = null
-  let geminiWeeklyResetsAt: number | null = null
-  let argon5h: number | null = null
-  let argonWeekly: number | null = null
-  let argon5hResetsAt: number | null = null
-  let argonWeeklyResetsAt: number | null = null
-
-  const root = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
-  const groups = Array.isArray(root.groups) ? root.groups : []
-
-  for (const g of groups) {
-    if (!g || typeof g !== 'object') continue
-    const group = g as Record<string, unknown>
-    const displayName = asString(group.displayName) ?? ''
-    const isArgon =
-      displayName.toLowerCase().includes('argon') ||
-      (group.name !== undefined && group.name !== null && String(group.name).toLowerCase().includes('argon'))
-    const buckets = Array.isArray(group.buckets) ? group.buckets : []
-    for (const b of buckets) {
-      if (!b || typeof b !== 'object') continue
-      const bucket = b as Record<string, unknown>
-      const frac = asNumber(bucket.remainingFraction)
-      if (frac === null) continue
-      const pct = Math.max(0, Math.min(100, frac * 100))
-      const win = asString(bucket.window)
-      const resetsAt = asTimestampMs(bucket.resetTime ?? bucket.resetsAt)
-      const isBucketArgon =
-        isArgon ||
-        (bucket.name !== undefined && bucket.name !== null && String(bucket.name).toLowerCase().includes('argon'))
-
-      if (isBucketArgon) {
-        if (win === '5h') {
-          argon5h = pct
-          argon5hResetsAt = resetsAt
-        } else if (win === 'weekly') {
-          argonWeekly = pct
-          argonWeeklyResetsAt = resetsAt
-        }
-      } else if (displayName.includes('Gemini')) {
-        if (win === '5h') {
-          gemini5h = pct
-          gemini5hResetsAt = resetsAt
-        } else if (win === 'weekly') {
-          geminiWeekly = pct
-          geminiWeeklyResetsAt = resetsAt
-        }
-      } else if (displayName.includes('Claude') || displayName.includes('GPT')) {
-        if (win === '5h') claude5h = pct
-        else if (win === 'weekly') claudeWeekly = pct
-      }
-    }
-  }
-
-  return {
-    gemini5h: round1(gemini5h),
-    geminiWeekly: round1(geminiWeekly),
-    claude5h: round1(claude5h),
-    claudeWeekly: round1(claudeWeekly),
-    effectiveGemini: round1(Math.min(gemini5h, geminiWeekly)),
-    gemini5hResetsAt,
-    geminiWeeklyResetsAt,
-    argon5h: argon5h !== null ? round1(argon5h) : null,
-    argonWeekly: argonWeekly !== null ? round1(argonWeekly) : null,
-    argon5hResetsAt,
-    argonWeeklyResetsAt
-  }
-}
+export { parseCloudCodeQuotaResponse, type QuotaSummary } from './quota-parse'
+import { parseCloudCodeQuotaResponse } from './quota-parse'
 
 type FetchOneResult = {
   account: AgyPoolAccount
@@ -295,22 +217,23 @@ function emptyPoolAccount(
   activeEmail: string | null,
   error: string | null
 ): AgyPoolAccount {
+  const base = account.baselineQuota
   return {
     email: account.email,
     name: account.name,
     source: account.source,
     active: activeEmail !== null && account.email.toLowerCase() === activeEmail.toLowerCase(),
-    gemini5h: null,
-    geminiWeekly: null,
-    claude5h: null,
-    claudeWeekly: null,
-    effectiveGemini: null,
-    gemini5hResetsAt: null,
-    geminiWeeklyResetsAt: null,
-    argon5h: null,
-    argonWeekly: null,
-    argon5hResetsAt: null,
-    argonWeeklyResetsAt: null,
+    gemini5h: base?.gemini5h ?? null,
+    geminiWeekly: base?.geminiWeekly ?? null,
+    claude5h: base?.claude5h ?? null,
+    claudeWeekly: base?.claudeWeekly ?? null,
+    effectiveGemini: base?.effectiveGemini ?? null,
+    gemini5hResetsAt: base?.gemini5hResetsAt ?? null,
+    geminiWeeklyResetsAt: base?.geminiWeeklyResetsAt ?? null,
+    argon5h: base?.argon5h ?? null,
+    argonWeekly: base?.argonWeekly ?? null,
+    argon5hResetsAt: base?.argon5hResetsAt ?? null,
+    argonWeeklyResetsAt: base?.argonWeeklyResetsAt ?? null,
     error
   }
 }
@@ -359,6 +282,22 @@ async function fetchOneAccount(
     if (!resp.ok) return fail(`Quota HTTP ${resp.status}`)
 
     const quotas = parseCloudCodeQuotaResponse(await resp.json())
+    if (
+      quotas.argonWeekly === null &&
+      account.baselineQuota?.argonWeekly !== null &&
+      account.baselineQuota?.argonWeekly !== undefined
+    ) {
+      quotas.argonWeekly = account.baselineQuota.argonWeekly
+      quotas.argonWeeklyResetsAt = account.baselineQuota.argonWeeklyResetsAt ?? null
+      if (
+        quotas.argon5h === null &&
+        account.baselineQuota.argon5h !== null &&
+        account.baselineQuota.argon5h !== undefined
+      ) {
+        quotas.argon5h = account.baselineQuota.argon5h
+        quotas.argon5hResetsAt = account.baselineQuota.argon5hResetsAt ?? null
+      }
+    }
     return {
       account: {
         email: account.email,

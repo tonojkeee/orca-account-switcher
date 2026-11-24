@@ -107,6 +107,129 @@ test('parseCloudCodeQuotaResponse returns null for argonWeekly when Argon is not
   assert.equal(parsed.argon5hResetsAt, null)
 })
 
+test('parseCloudCodeQuotaResponse normalizes snake_case quota_groups and models (corcakunda profile)', () => {
+  const parsed = parseCloudCodeQuotaResponse({
+    quota_groups: [
+      {
+        display_name: 'Gemini Models',
+        buckets: [
+          { bucket_id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.14771996, reset_time: '2026-11-25T05:41:27Z' },
+          { bucket_id: 'gemini-5h', window: '5h', remaining_fraction: 0.593747, reset_time: '2026-11-19T21:30:37Z' }
+        ]
+      },
+      {
+        display_name: 'Claude and GPT models',
+        buckets: [
+          { bucket_id: '3p-weekly', window: 'weekly', remaining_fraction: 1, reset_time: '2026-11-26T18:05:49Z' },
+          { bucket_id: '3p-5h', window: '5h', remaining_fraction: 1, reset_time: '2026-11-19T23:05:49Z' }
+        ]
+      },
+      {
+        display_name: 'Gemini 4 Argon',
+        buckets: [
+          { bucket_id: 'gemini-argon-wtu-weekly', window: 'weekly', remaining_fraction: 0.07732534, reset_time: '2026-11-26T04:33:03Z' }
+        ]
+      }
+    ],
+    models: [{ name: 'gemini-4-argon-high', percentage: 8, reset_time: '2026-11-26T04:33:03Z', display_name: 'Gemini 4 Argon (High)' }]
+  })
+
+  assert.equal(parsed.gemini5h, 59.4)
+  assert.equal(parsed.geminiWeekly, 14.8)
+  assert.equal(parsed.effectiveGemini, 14.8)
+  assert.equal(parsed.claudeWeekly, 100)
+  assert.equal(parsed.claude5h, 100)
+  assert.equal(parsed.argonWeekly, 7.7)
+  assert.equal(parsed.argonWeeklyResetsAt, Date.parse('2026-11-26T04:33:03Z'))
+  assert.equal(parsed.argon5h, null)
+  assert.equal(parsed.argon5hResetsAt, null)
+})
+
+test('parseCloudCodeQuotaResponse falls back to models array when quota_groups lacks Argon', () => {
+  const parsed = parseCloudCodeQuotaResponse({
+    quota_groups: [
+      { display_name: 'Gemini Models', buckets: [{ bucket_id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.5 }] }
+    ],
+    models: [{ name: 'gemini-4-argon-high', percentage: 8, reset_time: '2026-11-26T04:33:03Z' }]
+  })
+  assert.equal(parsed.geminiWeekly, 50)
+  assert.equal(parsed.argonWeekly, 8)
+  assert.equal(parsed.argonWeeklyResetsAt, Date.parse('2026-11-26T04:33:03Z'))
+})
+
+test('parseCloudCodeQuotaResponse falls back to models array when quota_groups is absent', () => {
+  const parsed = parseCloudCodeQuotaResponse({
+    models: [{ name: 'gemini-4-argon-medium', remaining_fraction: 0.25, reset_time: '2026-11-27T08:00:00Z' }]
+  })
+  assert.equal(parsed.argonWeekly, 25)
+  assert.equal(parsed.argonWeeklyResetsAt, Date.parse('2026-11-27T08:00:00Z'))
+})
+
+test('loadAgyToolsAccounts loads baselineQuota and falls back to it when live API returns no Argon', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'orca-agy-baseline-'))
+  try {
+    const paths = resolvePlatformPaths('linux', { XDG_CONFIG_HOME: path.join(home, '.config') }, home)
+    mkdirSync(paths.agyAccountsDir, { recursive: true })
+    mkdirSync(paths.orcaAcpDir, { recursive: true })
+    mkdirSync(paths.geminiDir, { recursive: true })
+
+    writeFileSync(
+      paths.orcaAcpTokenPath,
+      JSON.stringify({ client_id: 'cid', client_secret: 'csec', refresh_token: 'rt-corc', token_uri: 'https://oauth.test/token' })
+    )
+    writeFileSync(
+      path.join(paths.agyAccountsDir, 'corcakunda.json'),
+      JSON.stringify({
+        email: 'corcakunda@gmail.com',
+        name: 'Corca',
+        token: { refresh_token: 'rt-corc', access_token: 'at-corc', expiry_timestamp: Math.floor(Date.now() / 1000) + 3600 },
+        quota: {
+          quota_groups: [
+            { display_name: 'Gemini Models', buckets: [{ bucket_id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.15 }] },
+            { display_name: 'Gemini 4 Argon', buckets: [{ bucket_id: 'gemini-argon-wtu-weekly', window: 'weekly', remaining_fraction: 0.08, reset_time: '2026-11-26T04:33:03Z' }] }
+          ]
+        }
+      })
+    )
+    writeFileSync(
+      path.join(paths.agyAccountsDir, 'plain.json'),
+      JSON.stringify({
+        email: 'plain@gmail.com',
+        name: 'Plain',
+        token: { refresh_token: 'rt-plain', access_token: 'at-plain', expiry_timestamp: Math.floor(Date.now() / 1000) + 3600 },
+        quota: {
+          quota_groups: [{ display_name: 'Gemini Models', buckets: [{ bucket_id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.8 }] }]
+        }
+      })
+    )
+
+    const fakeFetch: QuotaFetcher = async (url) => {
+      if (url.includes('token')) return { ok: true, status: 200, json: async () => ({ access_token: 'at-live', expires_in: 3600 }) }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          groups: [{ displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.9 }, { window: 'weekly', remainingFraction: 0.85 }] }]
+        })
+      }
+    }
+
+    const state = await fetchAgyPoolState({ paths, platform: 'linux', fetcher: fakeFetch, refreshQuotas: true })
+    const corca = state.accounts.find((a) => a.email === 'corcakunda@gmail.com')
+    assert(corca !== undefined)
+    assert.equal(corca.geminiWeekly, 85)
+    assert.equal(corca.argonWeekly, 8)
+    assert.equal(corca.argonWeeklyResetsAt, Date.parse('2026-11-26T04:33:03Z'))
+
+    const plain = state.accounts.find((a) => a.email === 'plain@gmail.com')
+    assert(plain !== undefined)
+    assert.equal(plain.argonWeekly, null)
+    assert.equal(plain.argonWeeklyResetsAt, null)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 test('fetchAgyPoolState and switchAgyPoolAccount merge Vault + AGY Tools and switch agy CLI without external managers', async () => {
   const home = mkdtempSync(path.join(tmpdir(), 'orca-agy-test-'))
   try {
